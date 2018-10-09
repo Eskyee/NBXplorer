@@ -3,12 +3,23 @@
     <TargetFramework>netcoreapp2.1</TargetFramework>
   </PropertyGroup>
   <ItemGroup>
+<<<<<<< HEAD
       <PackageReference Include="NBitcoin.TestFramework" Version="1.6.7" />
 	  <PackageReference Include="Microsoft.NET.Test.Sdk" Version="15.7.2" />
 	  <PackageReference Include="xunit" Version="2.3.1" />
 	  <PackageReference Include="xunit.runner.visualstudio" Version="2.3.1" />
 	  <PackageReference Include="NBitcoin" Version="4.1.1.7" />
 	  <PackageReference Include="NBitcoin.TestFramework" Version="1.6.1" />
+=======
+      <PackageReference Include="Microsoft.Azure.ServiceBus" Version="3.1.0" />
+      <PackageReference Include="NBitcoin.TestFramework" Version="1.6.9" />
+	  <PackageReference Include="Microsoft.NET.Test.Sdk" Version="15.8.0" />
+	  <PackageReference Include="xunit" Version="2.4.0" />
+	  <PackageReference Include="xunit.runner.visualstudio" Version="2.4.0">
+	    <PrivateAssets>all</PrivateAssets>
+	    <IncludeAssets>runtime; build; native; contentfiles; analyzers</IncludeAssets>
+	  </PackageReference>
+>>>>>>> upstream/master
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\NBXplorer.Client\NBXplorer.Client.csproj" />
@@ -16,5 +27,8 @@
   </ItemGroup>
   <ItemGroup>
     <Service Include="{82a7f48d-3b50-4b1e-b82e-3ada8210c358}" />
+  </ItemGroup>
+  <ItemGroup>
+    <Folder Include="Properties\" />
   </ItemGroup>
 </Project>

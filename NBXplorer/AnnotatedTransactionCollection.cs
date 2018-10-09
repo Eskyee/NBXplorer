@@ -20,7 +20,7 @@ namespace NBXplorer
 		{
 
 		}
-		public AnnotatedTransaction(TrackedTransaction tracked, ChainBase chain)
+		public AnnotatedTransaction(TrackedTransaction tracked, SlimChain chain)
 		{
 			Record = tracked;
 			if(tracked.BlockHash == null)
@@ -65,7 +65,8 @@ namespace NBXplorer
 				_TxById.Add(h, tx);
 				foreach(var keyPathInfo in tx.Record.TransactionMatch.Inputs.Concat(tx.Record.TransactionMatch.Outputs))
 				{
-					_KeyPaths.TryAdd(keyPathInfo.ScriptPubKey, keyPathInfo.KeyPath);
+					if(keyPathInfo.KeyPath != null)
+						_KeyPaths.TryAdd(keyPathInfo.ScriptPubKey, keyPathInfo.KeyPath);
 				}
 			}
 

@@ -87,11 +87,13 @@ namespace NBXplorer.Tests
 				User2.CreateRPCClient().EnsureGenerate(Network.Consensus.CoinbaseMaturity + 1);
 				User1.Sync(User2, true);
 
+				var port = CustomServer.FreeTcpPort();
 				var datadir = Path.Combine(directory, "explorer");
 				DeleteRecursivelyWithMagicDust(datadir);
 				List<(string key, string value)> keyValues = new List<(string key, string value)>();
 				keyValues.Add(("conf", Path.Combine(directory, "explorer", "settings.config")));
 				keyValues.Add(("datadir", datadir));
+				keyValues.Add(("port", port.ToString()));
 				keyValues.Add(("network", "regtest"));
 				keyValues.Add(("chains", CryptoCode.ToLowerInvariant()));
 				keyValues.Add(("verbose", "1"));
@@ -103,6 +105,11 @@ namespace NBXplorer.Tests
 				keyValues.Add(("maxgapsize", "4"));
 				keyValues.Add(($"{CryptoCode.ToLowerInvariant()}startheight", Explorer.CreateRPCClient().GetBlockCount().ToString()));
 				keyValues.Add(($"{CryptoCode.ToLowerInvariant()}nodeendpoint", $"{Explorer.Endpoint.Address}:{Explorer.Endpoint.Port}"));
+				keyValues.Add(("asbcnstr", AzureServiceBusTestConfig.ConnectionString));
+				keyValues.Add(("asbblockq", AzureServiceBusTestConfig.NewBlockQueue));
+				keyValues.Add(("asbtranq", AzureServiceBusTestConfig.NewTransactionQueue));
+				keyValues.Add(("asbblockt", AzureServiceBusTestConfig.NewBlockTopic));
+				keyValues.Add(("asbtrant", AzureServiceBusTestConfig.NewTransactionTopic));
 
 				var args = keyValues.SelectMany(kv => new[] { $"--{kv.key}", kv.value }).ToArray();
 				Host = new WebHostBuilder()

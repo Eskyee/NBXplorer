@@ -1,24 +1,22 @@
-using NBXplorer.Logging;
+using Microsoft.Azure.ServiceBus;
+using Microsoft.Azure.ServiceBus.Core;
 using NBitcoin;
-using NBitcoin.DataEncoders;
+using NBitcoin.Protocol;
+using NBitcoin.RPC;
+using NBXplorer.DerivationStrategy;
+using NBXplorer.Models;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
+using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using Xunit;
 using Xunit.Abstractions;
-using NBitcoin.RPC;
-using System.Text;
-using NBitcoin.Crypto;
-using System.Collections.Generic;
-using NBXplorer.DerivationStrategy;
-using System.Diagnostics;
-using NBXplorer.Models;
-using System.Threading.Tasks;
-using System.Text.RegularExpressions;
-using System.IO;
-using NBitcoin.Protocol;
-using NBXplorer.Configuration;
-using Newtonsoft.Json.Linq;
 
 namespace NBXplorer.Tests
 {
@@ -36,7 +34,6 @@ namespace NBXplorer.Tests
 			using(var tester = RepositoryTester.Create(true))
 			{
 				var dummy = new DirectDerivationStrategy(new ExtKey().Neuter().GetWif(Network.RegTest)) { Segwit = false };
-				tester.Repository.Track(dummy);
 				RepositoryCanTrackAddressesCore(tester, dummy);
 			}
 		}
@@ -48,7 +45,9 @@ namespace NBXplorer.Tests
 			{
 				var dummy = new DirectDerivationStrategy(new ExtKey().Neuter().GetWif(Network.RegTest)) { Segwit = false };
 				var seria = new Serializer(Network.RegTest);
-				var keyInfo = new KeyPathInformation() { DerivationStrategy = dummy, Feature = DerivationFeature.Change, KeyPath = new KeyPath("0/1"), Redeem = Script.Empty, ScriptPubKey = Script.Empty };
+				var keyInfo = new KeyPathInformation() {
+					TrackedSource = new DerivationSchemeTrackedSource(dummy),
+					DerivationStrategy = dummy, Feature = DerivationFeature.Change, KeyPath = new KeyPath("0/1"), Redeem = Script.Empty, ScriptPubKey = Script.Empty };
 				var str = seria.ToString(keyInfo);
 				for(int i = 0; i < 1500; i++)
 				{
@@ -59,6 +58,7 @@ namespace NBXplorer.Tests
 
 		private static void RepositoryCanTrackAddressesCore(RepositoryTester tester, DerivationStrategyBase dummy)
 		{
+			Assert.Equal(2, tester.Repository.RefillAddressPoolIfNeeded(dummy, DerivationFeature.Deposit, 2).Result);
 			var keyInfo = tester.Repository.GetKeyInformation(dummy.GetLineFor(DerivationFeature.Deposit).Derive(0).ScriptPubKey);
 			Assert.NotNull(keyInfo);
 			Assert.Equal(new KeyPath("0/0"), keyInfo.KeyPath);
@@ -68,6 +68,11 @@ namespace NBXplorer.Tests
 			Assert.NotNull(keyInfo);
 			Assert.Equal(new KeyPath("0/1"), keyInfo.KeyPath);
 			Assert.Equal(keyInfo.DerivationStrategy.ToString(), dummy.ToString());
+
+			keyInfo = tester.Repository.GetKeyInformation(dummy.GetLineFor(DerivationFeature.Deposit).Derive(2).ScriptPubKey);
+			Assert.Null(keyInfo);
+			Assert.Equal(28, tester.Repository.RefillAddressPoolIfNeeded(dummy, DerivationFeature.Deposit).Result);
+			Assert.Equal(30, tester.Repository.RefillAddressPoolIfNeeded(dummy, DerivationFeature.Change).Result);
 
 			keyInfo = tester.Repository.GetKeyInformation(dummy.GetLineFor(DerivationFeature.Deposit).Derive(29).ScriptPubKey);
 			Assert.NotNull(keyInfo);
@@ -85,7 +90,7 @@ namespace NBXplorer.Tests
 			keyInfo = tester.Repository.GetKeyInformation(dummy.GetLineFor(DerivationFeature.Change).Derive(30).ScriptPubKey);
 			Assert.Null(keyInfo);
 
-			tester.Repository.MarkAsUsed(CreateKeyPathInformation((DirectDerivationStrategy)dummy, new KeyPath("1/5")));
+			MarkAsUsed(tester.Repository, dummy, new KeyPath("1/5"));
 			keyInfo = tester.Repository.GetKeyInformation(dummy.GetLineFor(DerivationFeature.Change).Derive(25).ScriptPubKey);
 			Assert.NotNull(keyInfo);
 			Assert.Equal(new KeyPath("1/25"), keyInfo.KeyPath);
@@ -99,11 +104,13 @@ namespace NBXplorer.Tests
 
 			for(int i = 0; i < 10; i++)
 			{
-				tester.Repository.MarkAsUsed(CreateKeyPathInformation((DirectDerivationStrategy)dummy, new KeyPath("1/" + i)));
+				Assert.Equal(0, tester.Repository.RefillAddressPoolIfNeeded(dummy, DerivationFeature.Deposit).Result);
+				MarkAsUsed(tester.Repository, dummy, new KeyPath("1/" + i));
 			}
 			keyInfo = tester.Repository.GetKeyInformation(dummy.GetLineFor(DerivationFeature.Deposit).Derive(30).ScriptPubKey);
 			Assert.Null(keyInfo);
-			tester.Repository.MarkAsUsed(CreateKeyPathInformation((DirectDerivationStrategy)dummy, new KeyPath("1/10")));
+			MarkAsUsed(tester.Repository, dummy, new KeyPath("1/10"));
+			Assert.Equal(11, tester.Repository.RefillAddressPoolIfNeeded(dummy, DerivationFeature.Deposit).Result);
 			keyInfo = tester.Repository.GetKeyInformation(dummy.GetLineFor(DerivationFeature.Deposit).Derive(30).ScriptPubKey);
 			Assert.NotNull(keyInfo);
 
@@ -114,7 +121,7 @@ namespace NBXplorer.Tests
 			Assert.Null(keyInfo);
 
 			//No op
-			tester.Repository.MarkAsUsed(CreateKeyPathInformation((DirectDerivationStrategy)dummy, new KeyPath("1/6")));
+			MarkAsUsed(tester.Repository, dummy, new KeyPath("1/6"));
 			keyInfo = tester.Repository.GetKeyInformation(dummy.GetLineFor(DerivationFeature.Change).Derive(29).ScriptPubKey);
 			Assert.NotNull(keyInfo);
 			Assert.Equal(new KeyPath("1/29"), keyInfo.KeyPath);
@@ -123,9 +130,30 @@ namespace NBXplorer.Tests
 			Assert.Null(keyInfo);
 		}
 
-		private static KeyPathInformation[] CreateKeyPathInformation(DirectDerivationStrategy pubKey, KeyPath keyPath)
+		private static void MarkAsUsed(Repository repository, DerivationStrategyBase strat, KeyPath keyPath)
 		{
-			return new[] { new KeyPathInformation() { Feature = DerivationFeature.Deposit, DerivationStrategy = pubKey, KeyPath = keyPath } };
+			repository.SaveMatches(DateTimeOffset.UtcNow,
+				new[] {
+					new MatchedTransaction()
+					{
+						Match = new TransactionMatch()
+						{
+							TrackedSource = new DerivationSchemeTrackedSource(strat),
+							DerivationStrategy = strat,
+							Transaction = repository.Network.NBitcoinNetwork.Consensus.ConsensusFactory.CreateTransaction(),
+							Outputs = new List<KeyPathInformation>
+							{
+								new KeyPathInformation()
+								{
+									TrackedSource = new DerivationSchemeTrackedSource(strat),
+									Feature = DerivationFeature.Deposit,
+									DerivationStrategy = strat,
+									KeyPath = keyPath
+								}
+							}
+						}
+					}
+				});
 		}
 
 		[Fact]
@@ -309,6 +337,193 @@ namespace NBXplorer.Tests
 		CancellationToken Cancel => new CancellationTokenSource(5000).Token;
 
 		[Fact]
+		public async Task CanSendAzureServiceBusNewBlockEventMessage()
+		{
+
+			Assert.False(string.IsNullOrWhiteSpace(AzureServiceBusTestConfig.ConnectionString), "Please Set Azure Service Bus Connection string in TestConfig.cs AzureServiceBusTestConfig Class. ");
+
+			Assert.False(string.IsNullOrWhiteSpace(AzureServiceBusTestConfig.NewBlockQueue), "Please Set Azure Service Bus NewBlockQueue name in TestConfig.cs AzureServiceBusTestConfig Class. ");
+
+			Assert.False(string.IsNullOrWhiteSpace(AzureServiceBusTestConfig.NewBlockTopic), "Please Set Azure Service Bus NewBlockTopic name in TestConfig.cs AzureServiceBusTestConfig Class. ");
+
+			Assert.False(string.IsNullOrWhiteSpace(AzureServiceBusTestConfig.NewBlockSubscription), "Please Set Azure Service Bus NewBlock Subscription name in TestConfig.cs AzureServiceBusTestConfig Class. ");
+
+
+			using(var tester = ServerTester.Create())
+			{
+				tester.Client.WaitServerStarted();
+				var key = new BitcoinExtKey(new ExtKey(), tester.Network);
+				var pubkey = tester.CreateDerivationStrategy(key.Neuter(), true);
+				tester.Client.Track(pubkey);
+
+				IQueueClient blockClient = new QueueClient(AzureServiceBusTestConfig.ConnectionString, AzureServiceBusTestConfig.NewBlockQueue);
+				ISubscriptionClient subscriptionClient = new SubscriptionClient(AzureServiceBusTestConfig.ConnectionString, AzureServiceBusTestConfig.NewBlockTopic, AzureServiceBusTestConfig.NewBlockSubscription);
+
+				//Configure Service Bus Subscription callback
+
+				//We may have existing messages from other tests - push all message to a LIFO stack
+				var busMessages = new ConcurrentStack<Microsoft.Azure.ServiceBus.Message>();
+
+				var messageHandlerOptions = new MessageHandlerOptions((e) =>
+				{
+					throw e.Exception;
+				})
+				{
+					// Maximum number of Concurrent calls to the callback `ProcessMessagesAsync`, set to 1 for simplicity.
+					// Set it according to how many messages the application wants to process in parallel.
+					MaxConcurrentCalls = 1,
+
+					// Indicates whether MessagePump should automatically complete the messages after returning from User Callback.
+					// False below indicates the Complete will be handled by the User Callback as in `ProcessMessagesAsync` below.
+					AutoComplete = false
+				};
+
+				//Service Bus Topic Message Handler
+				subscriptionClient.RegisterMessageHandler(async (m, t) =>
+				{
+					busMessages.Push(m);
+					await subscriptionClient.CompleteAsync(m.SystemProperties.LockToken);
+				}, messageHandlerOptions);
+
+
+				//Test Service Bus Queue
+				//Retry 10 times 
+				var retryPolicy = new RetryExponential(new TimeSpan(0, 0, 0, 0, 500), new TimeSpan(0, 0, 1), 10);
+
+				var messageReceiver = new MessageReceiver(AzureServiceBusTestConfig.ConnectionString, AzureServiceBusTestConfig.NewBlockQueue, ReceiveMode.ReceiveAndDelete, retryPolicy);
+				Microsoft.Azure.ServiceBus.Message msg = null;
+
+				//Clear any existing messages from queue
+				while(await messageReceiver.PeekAsync() != null)
+				{
+					// Batch the receive operation
+					var brokeredMessages = await messageReceiver.ReceiveAsync(300);
+				}
+				await messageReceiver.CloseAsync();     //Close queue , otherwise receiver will consume our test message
+
+				messageReceiver = new MessageReceiver(AzureServiceBusTestConfig.ConnectionString, AzureServiceBusTestConfig.NewBlockQueue, ReceiveMode.ReceiveAndDelete, retryPolicy);
+
+				//Create a new Block - AzureServiceBus broker will receive a message from EventAggregator and publish to queue
+				var expectedBlockId = tester.Explorer.CreateRPCClient().Generate(1)[0];
+
+				msg = await messageReceiver.ReceiveAsync();
+
+				JsonSerializerSettings settings = new JsonSerializerSettings();
+				new Serializer(Network.RegTest).ConfigureSerializer(settings);
+
+				Assert.True(msg != null, $"No message received on Azure Service Bus Block Queue : {AzureServiceBusTestConfig.NewBlockQueue} after 10 read attempts.");
+
+				Assert.Equal(msg.ContentType, typeof(NewBlockEvent).ToString());
+
+				var blockEventQ = JsonConvert.DeserializeObject<NewBlockEvent>(Encoding.UTF8.GetString(msg.Body), settings);
+				Assert.IsType<Models.NewBlockEvent>(blockEventQ);
+				Assert.Equal(expectedBlockId.ToString().ToUpperInvariant(), msg.MessageId.ToUpperInvariant());
+				Assert.Equal(expectedBlockId, blockEventQ.Hash);
+				Assert.NotEqual(0, blockEventQ.Height);
+
+				await Task.Delay(1000);
+				Assert.True(busMessages.Count > 0, $"No message received on Azure Service Bus Block Topic : {AzureServiceBusTestConfig.NewBlockTopic}.");
+				Microsoft.Azure.ServiceBus.Message busMsg = null;
+				busMessages.TryPop(out busMsg);
+				var blockEventS = JsonConvert.DeserializeObject<Models.NewBlockEvent>(Encoding.UTF8.GetString(busMsg.Body), settings);
+				Assert.IsType<Models.NewBlockEvent>(blockEventS);
+				Assert.Equal(expectedBlockId.ToString().ToUpperInvariant(), busMsg.MessageId.ToUpperInvariant());
+				Assert.Equal(expectedBlockId, blockEventS.Hash);
+				Assert.NotEqual(0, blockEventS.Height);
+			}
+		}
+
+		[Fact]
+		public async Task CanSendAzureServiceBusNewTransactionEventMessage()
+		{
+			Assert.False(string.IsNullOrWhiteSpace(AzureServiceBusTestConfig.ConnectionString), "Please Set Azure Service Bus Connection string in TestConfig.cs AzureServiceBusTestConfig Class.");
+
+			Assert.False(string.IsNullOrWhiteSpace(AzureServiceBusTestConfig.NewTransactionQueue), "Please Set Azure Service Bus NewTransactionQueue name in TestConfig.cs AzureServiceBusTestConfig Class.");
+
+			Assert.False(string.IsNullOrWhiteSpace(AzureServiceBusTestConfig.NewTransactionSubscription), "Please Set Azure Service Bus NewTransactionSubscription name in TestConfig.cs AzureServiceBusTestConfig Class.");
+
+
+			using(var tester = ServerTester.Create())
+			{
+				tester.Client.WaitServerStarted();
+				var key = new BitcoinExtKey(new ExtKey(), tester.Network);
+				var pubkey = tester.CreateDerivationStrategy(key.Neuter(), true);
+				tester.Client.Track(pubkey);
+
+				IQueueClient tranClient = new QueueClient(AzureServiceBusTestConfig.ConnectionString, AzureServiceBusTestConfig.NewTransactionQueue);
+				ISubscriptionClient subscriptionClient = new SubscriptionClient(AzureServiceBusTestConfig.ConnectionString, AzureServiceBusTestConfig.NewTransactionTopic, AzureServiceBusTestConfig.NewTransactionSubscription);
+
+				//Configure Service Bus Subscription callback				
+				//We may have existing messages from other tests - push all message to a LIFO stack
+				var busMessages = new ConcurrentStack<Microsoft.Azure.ServiceBus.Message>();
+
+				var messageHandlerOptions = new MessageHandlerOptions((e) =>
+				{
+					throw e.Exception;
+				})
+				{
+					// Maximum number of Concurrent calls to the callback `ProcessMessagesAsync`, set to 1 for simplicity.
+					// Set it according to how many messages the application wants to process in parallel.
+					MaxConcurrentCalls = 1,
+
+					// Indicates whether MessagePump should automatically complete the messages after returning from User Callback.
+					// False below indicates the Complete will be handled by the User Callback as in `ProcessMessagesAsync` below.
+					AutoComplete = false
+				};
+
+				//Service Bus Topic Message Handler
+				subscriptionClient.RegisterMessageHandler(async (m, t) =>
+				{
+					busMessages.Push(m);
+					await subscriptionClient.CompleteAsync(m.SystemProperties.LockToken);
+				}, messageHandlerOptions);
+
+				//Configure JSON custom serialization
+				JsonSerializerSettings settings = new JsonSerializerSettings();
+				new Serializer(Network.RegTest).ConfigureSerializer(settings);
+
+				//Test Service Bus Queue
+				//Retry 10 times 
+				var retryPolicy = new RetryExponential(new TimeSpan(0, 0, 0, 0, 500), new TimeSpan(0, 0, 1), 10);
+
+				//Setup Message Receiver and clear queue
+				var messageReceiver = new MessageReceiver(AzureServiceBusTestConfig.ConnectionString, AzureServiceBusTestConfig.NewTransactionQueue, ReceiveMode.ReceiveAndDelete, retryPolicy);
+				while(await messageReceiver.PeekAsync() != null)
+				{
+					// Batch the receive operation
+					var brokeredMessages = await messageReceiver.ReceiveAsync(300);
+				}
+				await messageReceiver.CloseAsync();
+
+
+				//New message receiver to listen to our test event
+				messageReceiver = new MessageReceiver(AzureServiceBusTestConfig.ConnectionString, AzureServiceBusTestConfig.NewTransactionQueue, ReceiveMode.ReceiveAndDelete, retryPolicy);
+
+				//Create a new UTXO for our tracked key
+				tester.Explorer.CreateRPCClient().SendToAddress(tester.AddressOf(pubkey, "0/1"), Money.Coins(1.0m));
+
+				//Check Queue Message
+				Microsoft.Azure.ServiceBus.Message msg = null;
+				msg = await messageReceiver.ReceiveAsync();
+
+				Assert.True(msg != null, $"No message received on Azure Service Bus Transaction Queue : {AzureServiceBusTestConfig.NewTransactionQueue} after 10 read attempts.");
+
+				var txEventQ = JsonConvert.DeserializeObject<NewTransactionEvent>(Encoding.UTF8.GetString(msg.Body), settings);
+				Assert.Equal(txEventQ.DerivationStrategy, pubkey);
+
+				await Task.Delay(1000);
+				Assert.True(busMessages.Count > 0, $"No message received on Azure Service Bus Transaction Topic : {AzureServiceBusTestConfig.NewTransactionTopic}.");
+				//Check Service Bus Topic Payload
+
+				Microsoft.Azure.ServiceBus.Message busMsg = null;
+				busMessages.TryPop(out busMsg);
+				var blockEventS = JsonConvert.DeserializeObject<NewTransactionEvent>(Encoding.UTF8.GetString(busMsg.Body), settings);
+				Assert.IsType<NewTransactionEvent>(blockEventS);
+				Assert.Equal(blockEventS.DerivationStrategy, pubkey);
+
+			}
+		}
+		[Fact]
 		public void CanUseWebSockets()
 		{
 			using(var tester = ServerTester.Create())
@@ -335,6 +550,15 @@ namespace NBXplorer.Tests
 				using(var connected = tester.Client.CreateNotificationSession())
 				{
 					connected.ListenAllDerivationSchemes();
+					tester.Explorer.CreateRPCClient().SendToAddress(tester.AddressOf(pubkey, "0/1"), Money.Coins(1.0m));
+
+					var txEvent = (Models.NewTransactionEvent)connected.NextEvent(Cancel);
+					Assert.Equal(txEvent.DerivationStrategy, pubkey);
+				}
+
+				using (var connected = tester.Client.CreateNotificationSession())
+				{
+					connected.ListenAllTrackedSource();
 					tester.Explorer.CreateRPCClient().SendToAddress(tester.AddressOf(pubkey, "0/1"), Money.Coins(1.0m));
 
 					var txEvent = (Models.NewTransactionEvent)connected.NextEvent(Cancel);
@@ -520,10 +744,153 @@ namespace NBXplorer.Tests
 
 				tester.RPC.EnsureGenerate(1);
 
-				utxo = tester.Client.GetUTXOs(pubkey, utxo);
+				utxo = tester.Client.GetUTXOs(pubkey, utxo, true, Timeout);
 				Assert.Single(utxo.Confirmed.UTXOs);
 				Assert.True(utxo.Confirmed.HasChanges);
 				Assert.Empty(utxo.Confirmed.SpentOutpoints);
+			}
+		}
+
+		[Fact]
+		public void CanUseWebSocketsOnAddress()
+		{
+			using (var tester = ServerTester.Create())
+			{
+				tester.Client.WaitServerStarted();
+				var key = new Key();
+				var pubkey = TrackedSource.Create(key.PubKey.GetAddress(tester.Network));
+				tester.Client.Track(pubkey);
+				using (var connected = tester.Client.CreateNotificationSession())
+				{
+					connected.ListenNewBlock();
+					var expectedBlockId = tester.Explorer.CreateRPCClient().Generate(1)[0];
+					var blockEvent = (Models.NewBlockEvent)connected.NextEvent(Cancel);
+					Assert.Equal(expectedBlockId, blockEvent.Hash);
+					Assert.NotEqual(0, blockEvent.Height);
+
+					connected.ListenTrackedSources(new[] { pubkey });
+					tester.Explorer.CreateRPCClient().SendToAddress(pubkey.Address, Money.Coins(1.0m));
+
+					var txEvent = (Models.NewTransactionEvent)connected.NextEvent(Cancel);
+					Assert.Equal(txEvent.TrackedSource, pubkey);
+				}
+
+				using (var connected = tester.Client.CreateNotificationSession())
+				{
+					connected.ListenAllTrackedSource();
+					tester.Explorer.CreateRPCClient().SendToAddress(pubkey.Address, Money.Coins(1.0m));
+
+					var txEvent = (Models.NewTransactionEvent)connected.NextEvent(Cancel);
+					Assert.Equal(txEvent.TrackedSource, pubkey);
+				}
+			}
+		}
+
+		[Fact]
+		public void CanUseWebSocketsOnAddress2()
+		{
+			using (var tester = ServerTester.Create())
+			{
+				tester.Client.WaitServerStarted();
+				var key = new Key();
+				var pubkey = TrackedSource.Create(key.PubKey.GetAddress(tester.Network));
+
+				var key2 = new Key();
+				var pubkey2 = TrackedSource.Create(key2.PubKey.GetAddress(tester.Network));
+
+				tester.Client.Track(pubkey);
+				tester.Client.Track(pubkey2);
+				using (var connected = tester.Client.CreateNotificationSession())
+				{
+					connected.ListenAllTrackedSource();
+					tester.Explorer.CreateRPCClient().SendCommand(RPCOperations.sendmany, "",
+						JObject.Parse($"{{ \"{pubkey.Address}\": \"0.9\", \"{pubkey.Address}\": \"0.5\"," +
+									  $"\"{pubkey2.Address}\": \"0.9\", \"{pubkey2.Address}\": \"0.5\" }}"));
+
+					var trackedSources = new[] { pubkey.ToString(), pubkey2.ToString() }.ToList();
+
+					var txEvent = (Models.NewTransactionEvent)connected.NextEvent(Cancel);
+					Assert.Single(txEvent.Outputs);
+					Assert.Contains(txEvent.TrackedSource.ToString(), trackedSources);
+					trackedSources.Remove(txEvent.TrackedSource.ToString());
+
+					txEvent = (Models.NewTransactionEvent)connected.NextEvent(Cancel);
+					Assert.Single(txEvent.Outputs);
+					Assert.Contains(txEvent.TrackedSource.ToString(), new[] { pubkey.ToString(), pubkey2.ToString() });
+				}
+			}
+		}
+
+		[Fact]
+		public void CanTrackAddress()
+		{
+			using (var tester = ServerTester.Create())
+			{
+				var extkey = new BitcoinExtKey(new ExtKey(), tester.Network);
+				var pubkey = new DerivationStrategyFactory(extkey.Network).Parse($"{extkey.Neuter()}-[legacy]");
+				var key = extkey.ExtKey.Derive(new KeyPath("0/0")).PrivateKey;
+				var address = key.PubKey.GetAddress(tester.Network);
+				var addressSource = TrackedSource.Create(address);
+				tester.Client.Track(addressSource);
+				var utxo = tester.Client.GetUTXOs(addressSource, null, false); //Track things do not wait
+
+				var tx1 = tester.SendToAddress(address, Money.Coins(1.0m));
+				utxo = tester.Client.GetUTXOs(addressSource, utxo);
+				Assert.NotNull(utxo.Confirmed.KnownBookmark);
+				Assert.Single(utxo.Unconfirmed.UTXOs);
+				Assert.Equal(tx1, utxo.Unconfirmed.UTXOs[0].Outpoint.Hash);
+
+				// The address has been only tracked individually, not via the extpubkey
+				tester.Client.Track(pubkey);
+				var unused = tester.Client.GetUnused(pubkey, DerivationFeature.Deposit);
+				Assert.Equal(new KeyPath("0/0"), unused.KeyPath);
+				Assert.Equal(address.ScriptPubKey, unused.ScriptPubKey);
+				utxo = tester.Client.GetUTXOs(pubkey, null);
+				Assert.Empty(utxo.Unconfirmed.UTXOs);
+
+				// But this end up tracked once the block is mined
+				tester.RPC.Generate(1);
+				utxo = tester.Client.GetUTXOs(pubkey, utxo);
+				Assert.NotNull(utxo.Confirmed.KnownBookmark);
+				Assert.Single(utxo.Confirmed.UTXOs);
+				Assert.Equal(tx1, utxo.Confirmed.UTXOs[0].Outpoint.Hash);
+				Assert.NotNull(utxo.TrackedSource);
+				Assert.NotNull(utxo.DerivationStrategy);
+				var dsts = Assert.IsType<DerivationSchemeTrackedSource>(utxo.TrackedSource);
+				Assert.Equal(utxo.DerivationStrategy, dsts.DerivationStrategy);
+
+				// Make sure the transaction appear for address as well
+				utxo = tester.Client.GetUTXOs(addressSource, null);
+				Assert.Single(utxo.Confirmed.UTXOs);
+				Assert.Equal(tx1, utxo.Confirmed.UTXOs[0].Outpoint.Hash);
+				Assert.NotNull(utxo.TrackedSource);
+				Assert.Null(utxo.DerivationStrategy);
+				Assert.IsType<AddressTrackedSource>(utxo.TrackedSource);
+
+				// Check it appear in transaction list
+				var tx = tester.Client.GetTransactions(addressSource, null);
+				Assert.Equal(tx1, tx.ConfirmedTransactions.Transactions[0].TransactionId);
+
+				tx = tester.Client.GetTransactions(pubkey, null);
+				Assert.Equal(tx1, tx.ConfirmedTransactions.Transactions[0].TransactionId);
+
+				// Trying to send to a single address from a tracked extkey
+				var extkey2 = new BitcoinExtKey(new ExtKey(), tester.Network);
+				var pubkey2 = new DerivationStrategyFactory(extkey.Network).Parse($"{extkey.Neuter()}-[legacy]");
+				tester.Client.Track(pubkey2);
+				tester.SendToAddress(pubkey2.Derive(new KeyPath("0/0")).ScriptPubKey.GetDestinationAddress(tester.Network), Money.Coins(1.0m));
+
+				utxo = tester.Client.GetUTXOs(addressSource, null);
+				var utxo2 = tester.Client.GetUTXOs(pubkey2, null);
+				LockTestCoins(tester.RPC);
+				tester.RPC.ImportPrivKey(tester.PrivateKeyOf(extkey2, "0/0"));
+				var tx2 = tester.SendToAddress(address, Money.Coins(0.6m));
+				utxo = tester.Client.GetUTXOs(addressSource, utxo);
+				utxo2 = tester.Client.GetUTXOs(pubkey2, utxo);
+				Thread.Sleep(200);
+				Assert.NotEqual(utxo.Unconfirmed.UTXOs[0].Outpoint, utxo2.Unconfirmed.UTXOs[0].Outpoint);
+				Assert.Null(utxo.Unconfirmed.UTXOs[0].Feature);
+				Assert.NotNull(utxo2.Unconfirmed.UTXOs[0].Outpoint);
 			}
 		}
 
@@ -787,6 +1154,62 @@ namespace NBXplorer.Tests
 		}
 
 		[Fact]
+		public void CanRescan()
+		{
+			using(var tester = ServerTester.Create())
+			{
+				tester.Client.WaitServerStarted(Timeout);
+				var key = new BitcoinExtKey(new ExtKey(), tester.Network);
+				var pubkey = tester.CreateDerivationStrategy(key.Neuter());
+
+				var txId1 = tester.SendToAddress(tester.AddressOf(key, "0/0"), Money.Coins(1.0m));
+				var txId2 = tester.SendToAddress(tester.AddressOf(key, "0/0"), Money.Coins(1.0m));
+				var txId3 = tester.SendToAddress(tester.AddressOf(key, "0/0"), Money.Coins(1.0m));
+				var txId4 = tester.SendToAddress(tester.AddressOf(key, "0/0"), Money.Coins(1.0m));
+				var tx4 = tester.RPC.GetRawTransaction(txId4);
+				var notify = tester.Client.CreateNotificationSession();
+				notify.ListenNewBlock();
+				var blockId = tester.RPC.Generate(1)[0];
+				var blockId2 = tester.RPC.Generate(1)[0];
+
+				notify.NextEvent();
+				tester.Client.Track(pubkey);
+
+				var utxos = tester.Client.GetUTXOs(pubkey, null, false);
+				Assert.Empty(utxos.Confirmed.UTXOs);
+
+				for(int i = 0; i < 2; i++)
+				{
+					tester.Client.Rescan(new RescanRequest()
+					{
+						Transactions =
+						{
+							new RescanRequest.TransactionToRescan() { BlockId = blockId, TransactionId = txId1 },
+							new RescanRequest.TransactionToRescan() { BlockId = blockId2, TransactionId = txId2 }, // should fail because wrong block
+							new RescanRequest.TransactionToRescan() {  TransactionId = txId3 },  // should fail because no -txindex, but RPC remember wallet transactions :(
+							new RescanRequest.TransactionToRescan() { BlockId = blockId, Transaction = tx4 },  // should find it
+						}
+					});
+
+					utxos = tester.Client.GetUTXOs(pubkey, null, false);
+					foreach(var txid in new[] { txId1, txId4, txId3 })
+					{
+						Assert.Contains(utxos.Confirmed.UTXOs, u => u.AsCoin().Outpoint.Hash == txid);
+						var tx = tester.Client.GetTransaction(txid);
+						Assert.Equal(2, tx.Confirmations);
+					}
+					Assert.Equal(3, tester.Client.GetTransactions(pubkey, null, false).ConfirmedTransactions.Transactions.Count);
+					foreach(var utxo in utxos.Confirmed.UTXOs)
+						Assert.Equal(2, utxo.Confirmations);
+					foreach(var txid in new[] { txId2 })
+					{
+						Assert.DoesNotContain(utxos.Confirmed.UTXOs, u => u.AsCoin().Outpoint.Hash == txid);
+					}
+				}
+			}
+		}
+
+		[Fact]
 		public void CanTrack()
 		{
 			using(var tester = ServerTester.Create())
@@ -1011,15 +1434,15 @@ namespace NBXplorer.Tests
 				Assert.Equal(new KeyPath("0"), path);
 			}
 		}
-		
+
 		[Fact]
 		public void CanGetKeyInformations()
 		{
-			using (var tester = ServerTester.Create())
+			using(var tester = ServerTester.Create())
 			{
 				var key = new BitcoinExtKey(new ExtKey(), tester.Network);
 				var pubkey = tester.CreateDerivationStrategy(key.Neuter());
-				tester.Client.Track(pubkey);							
+				tester.Client.Track(pubkey);
 
 				KeyPathInformation[] keyinfos;
 				var script = pubkey.Derive(new KeyPath("0/0")).ScriptPubKey;
@@ -1027,16 +1450,16 @@ namespace NBXplorer.Tests
 				keyinfos = tester.Client.GetKeyInformations(script);
 				Assert.NotNull(keyinfos);
 				Assert.True(keyinfos.Length > 0);
-				foreach (var k in keyinfos)
+				foreach(var k in keyinfos)
 				{
 					Assert.Equal(pubkey, k.DerivationStrategy);
 					Assert.Equal(script, k.ScriptPubKey);
 					Assert.Equal(new KeyPath("0/0"), k.KeyPath);
 					Assert.Equal(DerivationFeature.Deposit, k.Feature);
-				}				
+				}
 			}
 		}
-		
+
 		[Fact]
 		public void CanTrackDirect()
 		{

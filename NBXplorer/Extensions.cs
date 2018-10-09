@@ -26,6 +26,9 @@ using System.Threading.Tasks;
 using System.Threading;
 using Microsoft.AspNetCore.Authentication;
 using NBXplorer.Authentication;
+using NBitcoin.DataEncoders;
+using System.Text.RegularExpressions;
+using NBXplorer.MessageBrokers;
 
 namespace NBXplorer
 {
@@ -51,10 +54,32 @@ namespace NBXplorer
 			var data = Encoding.UTF8.GetBytes(derivation.ToString());
 			return new uint160(Hashes.RIPEMD160(data, data.Length));
 		}
+		internal static uint160 GetHash(this TrackedSource trackedSource)
+		{
+			if (trackedSource is DerivationSchemeTrackedSource t)
+				return t.DerivationStrategy.GetHash();
+			var data = Encoding.UTF8.GetBytes(trackedSource.ToString());
+			return new uint160(Hashes.RIPEMD160(data, data.Length));
+		}
+
+
+		public static async Task<DateTimeOffset?> GetBlockTimeAsync(this RPCClient client, uint256 blockId, bool throwIfNotFound = true)
+		{
+			var response = await client.SendCommandAsync(new RPCRequest("getblockheader", new object[] { blockId }), throwIfNotFound).ConfigureAwait(false);
+			if(throwIfNotFound)
+				response.ThrowIfError();
+			if(response.Error != null && response.Error.Code == RPCErrorCode.RPC_INVALID_ADDRESS_OR_KEY)
+				return null;
+			if(response.Result["time"] != null)
+			{
+				return NBitcoin.Utils.UnixTimeToDateTime((uint)response.Result["time"]);
+			}
+			return null;
+		}
 
 		public static IEnumerable<TransactionMatch> GetMatches(this Repository repository, Transaction tx)
 		{
-			var matches = new Dictionary<DerivationStrategyBase, TransactionMatch>();
+			var matches = new Dictionary<string, TransactionMatch>();
 			HashSet<Script> inputScripts = new HashSet<Script>();
 			HashSet<Script> outputScripts = new HashSet<Script>();
 			HashSet<Script> scripts = new HashSet<Script>();
@@ -79,11 +104,13 @@ namespace NBXplorer
 			{
 				foreach(var keyInfo in keyInfoByScripts.Value)
 				{
-					if(!matches.TryGetValue(keyInfo.DerivationStrategy, out TransactionMatch match))
+					var matchesGroupingKey = keyInfo.DerivationStrategy?.ToString() ?? keyInfo.ScriptPubKey.ToHex();
+					if (!matches.TryGetValue(matchesGroupingKey, out TransactionMatch match))
 					{
 						match = new TransactionMatch();
-						matches.Add(keyInfo.DerivationStrategy, match);
-						match.DerivationStrategy = keyInfo.DerivationStrategy;
+						matches.Add(matchesGroupingKey, match);
+						match.TrackedSource = keyInfo.TrackedSource;
+						match.DerivationStrategy = (keyInfo.TrackedSource as DerivationSchemeTrackedSource)?.DerivationStrategy;
 						match.Transaction = tx;
 					}
 
@@ -108,26 +135,21 @@ namespace NBXplorer
 
 		public class ConfigureCookieFileBasedConfiguration : IConfigureNamedOptions<BasicAuthenticationOptions>
 		{
-			ExplorerConfiguration _Configuration;
-			public ConfigureCookieFileBasedConfiguration(ExplorerConfiguration configuration)
+			CookieRepository _CookieRepo;
+			public ConfigureCookieFileBasedConfiguration(CookieRepository cookieRepo)
 			{
-				_Configuration = configuration;
+				_CookieRepo = cookieRepo;
 			}
 
 			public void Configure(string name, BasicAuthenticationOptions options)
 			{
 				if(name == "Basic")
 				{
-					if(!_Configuration.NoAuthentication)
+					var creds = _CookieRepo.GetCredentials();
+					if(creds != null)
 					{
-						var cookieFile = Path.Combine(_Configuration.DataDir, ".cookie");
-						var pass = new uint256(RandomUtils.GetBytes(32));
-						var user = "__cookie__";
-						var cookieStr = user + ":" + pass;
-						File.WriteAllText(cookieFile, cookieStr);
-
-						options.Username = user;
-						options.Password = pass.ToString();
+						options.Username = creds.UserName;
+						options.Password = creds.Password;
 					}
 				}
 			}
@@ -158,10 +180,14 @@ namespace NBXplorer
 			services.AddSingleton<IConfigureOptions<MvcJsonOptions>, MVCConfigureOptions>();
 			services.TryAddSingleton<ChainProvider>();
 
+			services.TryAddSingleton<CookieRepository>();
 			services.TryAddSingleton<RepositoryProvider>();
 			services.TryAddSingleton<EventAggregator>();
+			services.TryAddSingleton<AddressPoolServiceAccessor>();
+			services.AddSingleton<IHostedService, AddressPoolService>();
 			services.TryAddSingleton<BitcoinDWaitersAccessor>();
 			services.AddSingleton<IHostedService, BitcoinDWaiters>();
+			services.AddSingleton<IHostedService, BrokerHostedService>();
 
 			services.AddSingleton<ExplorerConfiguration>(o => o.GetRequiredService<IOptions<ExplorerConfiguration>>().Value);
 
@@ -181,6 +207,27 @@ namespace NBXplorer
 				o.LoadArgs(conf);
 			});
 			return services;
+		}
+
+		internal static string ToPrettyString(this TrackedSource trackedSource)
+		{
+			if (trackedSource is DerivationSchemeTrackedSource derivation)
+			{
+				var strategy = derivation.DerivationStrategy.ToString();
+				if (strategy.Length > 35)
+				{
+					strategy = strategy.Substring(0, 10) + "..." + strategy.Substring(strategy.Length - 20);
+				}
+				return strategy;
+			}
+			else if (trackedSource is AddressTrackedSource addressDerivation)
+			{
+				return addressDerivation.Address.ToString();
+			}
+			else
+			{
+				return trackedSource.ToString();
+			}
 		}
 
 		internal class NoObjectModelValidator : IObjectModelValidator

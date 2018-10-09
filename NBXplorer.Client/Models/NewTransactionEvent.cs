@@ -3,15 +3,20 @@ using System.Collections.Generic;
 using System.Text;
 using NBitcoin;
 using NBXplorer.DerivationStrategy;
+using Newtonsoft.Json;
 
 namespace NBXplorer.Models
 {
-	public class NewTransactionEvent
+	public class NewTransactionEvent : NewEventBase
 	{
 		public uint256 BlockId
 		{
 			get; set;
 		}
+
+		public TrackedSource TrackedSource { get; set; }
+
+		[JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
 
 		public DerivationStrategyBase DerivationStrategy
 		{
@@ -32,15 +37,10 @@ namespace NBXplorer.Models
 		{
 			get; set;
 		} = new List<KeyPathInformation>();
-		public string CryptoCode
-		{
-			get;
-			set;
-		}
 
 		public TransactionMatch AsMatch()
 		{
-			return new TransactionMatch() { DerivationStrategy = DerivationStrategy, Inputs = Inputs, Outputs = Outputs, Transaction = TransactionData.Transaction };
+			return new TransactionMatch() { DerivationStrategy = DerivationStrategy, TrackedSource = TrackedSource, Inputs = Inputs, Outputs = Outputs, Transaction = TransactionData.Transaction };
 		}
 	}
 }

@@ -14,6 +14,7 @@ using System.Net;
 using NBitcoin.Protocol.Behaviors;
 using Microsoft.Extensions.Hosting;
 using NBXplorer.Events;
+using Newtonsoft.Json.Linq;
 
 namespace NBXplorer
 {
@@ -41,6 +42,7 @@ namespace NBXplorer
 		Dictionary<string, BitcoinDWaiter> _Waiters;
 		public BitcoinDWaiters(
 							BitcoinDWaitersAccessor accessor,
+							AddressPoolServiceAccessor addressPool,
 								NBXplorerNetworkProvider networkProvider,
 							  ChainProvider chains,
 							  RepositoryProvider repositoryProvider,
@@ -61,6 +63,7 @@ namespace NBXplorer
 												networkProvider.GetFromCryptoCode(s.Network.CryptoCode),
 												s.Chain,
 												s.Repository,
+												addressPool.Instance,
 												eventAggregator))
 				.ToDictionary(s => s.Network.CryptoCode, s => s);
 		}
@@ -95,25 +98,32 @@ namespace NBXplorer
 		RPCClient _RPC;
 		NBXplorerNetwork _Network;
 		ExplorerConfiguration _Configuration;
-		ConcurrentChain _Chain;
+		private readonly AddressPoolService _AddressPoolService;
+		SlimChain _Chain;
 		private Repository _Repository;
 		EventAggregator _EventAggregator;
+		private readonly ChainConfiguration _ChainConfiguration;
 
 		public BitcoinDWaiter(
 			RPCClient rpc,
 			ExplorerConfiguration configuration,
 			NBXplorerNetwork network,
-			ConcurrentChain chain,
+			SlimChain chain,
 			Repository repository,
+			AddressPoolService addressPoolService,
 			EventAggregator eventAggregator)
 		{
+			if(addressPoolService == null)
+				throw new ArgumentNullException(nameof(addressPoolService));
 			_RPC = rpc;
 			_Configuration = configuration;
+			_AddressPoolService = addressPoolService;
 			_Network = network;
 			_Chain = chain;
 			_Repository = repository;
 			State = BitcoinDWaiterState.NotStarted;
 			_EventAggregator = eventAggregator;
+			_ChainConfiguration = _Configuration.ChainConfigurations.First(c => c.CryptoCode == _Network.CryptoCode);
 		}
 		public NodeState NodeState
 		{
@@ -166,13 +176,17 @@ namespace NBXplorer
 				throw new ObjectDisposedException(nameof(BitcoinDWaiter));
 
 			_Cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-			_Loop = StartLoop(_Cts.Token);
-			_Subscription = _EventAggregator.Subscribe<NewBlockEvent>(s => _Tick.Set());
+			_Loop = StartLoop(_Cts.Token, _Tick);
+			_Subscription = _EventAggregator.Subscribe<NewBlockEvent>(s =>
+			{
+				_Tick.Set();
+			});
 			return Task.CompletedTask;
 		}
+
 		AutoResetEvent _Tick = new AutoResetEvent(false);
 
-		private async Task StartLoop(CancellationToken token)
+		private async Task StartLoop(CancellationToken token, AutoResetEvent tick)
 		{
 			try
 			{
@@ -183,12 +197,12 @@ namespace NBXplorer
 						while(await StepAsync(token))
 						{
 						}
-						await Task.WhenAny(_Tick.WaitOneAsync(), Task.Delay(PollingInterval, token));
+						await Task.WhenAny(tick.WaitOneAsync(), Task.Delay(PollingInterval, token));
 					}
 					catch(Exception ex) when(!token.IsCancellationRequested)
 					{
-						Logs.Configuration.LogError(ex, $"{_Network.CryptoCode}: Unhandled exception in BitcoinDWaiter");
-						await Task.WhenAny(_Tick.WaitOneAsync(), Task.Delay(TimeSpan.FromSeconds(5.0), token));
+						Logs.Configuration.LogError(ex, $"{_Network.CryptoCode}: Unhandled in Waiter loop");
+						await Task.WhenAny(tick.WaitOneAsync(), Task.Delay(TimeSpan.FromSeconds(5.0), token));
 					}
 				}
 			}
@@ -227,6 +241,12 @@ namespace NBXplorer
 			State = BitcoinDWaiterState.NotStarted;
 			_Chain = null;
 			_Tick.Set();
+			_Tick.Dispose();
+			try
+			{
+				_Loop.Wait();
+			}
+			catch { }
 			return _Loop;
 		}
 
@@ -333,9 +353,16 @@ namespace NBXplorer
 		{
 			if(_Group != null)
 				return;
-			_Chain.SetTip(_Chain.Genesis);
-			if(_Configuration.CacheChain)
+			_Chain.ResetToGenesis();
+			if (_Configuration.CacheChain)
+			{
 				LoadChainFromCache();
+				if (!await HasBlock(_RPC, _Chain.Tip))
+				{
+					Logs.Configuration.LogInformation($"{_Network.CryptoCode}: The cached chain contains a tip unknown to the node, dropping the cache...");
+					_Chain.ResetToGenesis();
+				}
+			}
 			var heightBefore = _Chain.Height;
 			using(var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation))
 			{
@@ -353,13 +380,39 @@ namespace NBXplorer
 			{
 				SaveChainInCache();
 			}
+			GC.Collect();
 			await LoadGroup();
+		}
+
+		private async Task<bool> HasBlock(RPCClient rpc, uint256 tip)
+		{
+			try
+			{
+				await rpc.GetBlockHeaderAsync(tip);
+				return true;
+			}
+			catch (RPCException r) when (r.RPCCode == RPCErrorCode.RPC_METHOD_NOT_FOUND)
+			{
+				try
+				{
+					await rpc.GetBlockAsync(tip);
+					return true;
+				}
+				catch
+				{
+					return false;
+				}
+			}
+			catch (RPCException r) when (r.RPCCode == RPCErrorCode.RPC_INVALID_ADDRESS_OR_KEY)
+			{
+				return false;
+			}
 		}
 
 		private async Task LoadGroup()
 		{
 			AddressManager manager = new AddressManager();
-			manager.Add(new NetworkAddress(GetEndpoint()), IPAddress.Loopback);
+			manager.Add(new NetworkAddress(_ChainConfiguration.NodeEndpoint), IPAddress.Loopback);
 			NodesGroup group = new NodesGroup(_Network.NBitcoinNetwork, new NodeConnectionParameters()
 			{
 				Services = NodeServices.Nothing,
@@ -371,13 +424,8 @@ namespace NBXplorer
 						PeersToDiscover = 1,
 						Mode = AddressManagerBehaviorMode.None
 					},
-					new ExplorerBehavior(_Repository, _Chain, _EventAggregator) { StartHeight = _Configuration.ChainConfigurations.First(c => c.CryptoCode == _Network.CryptoCode).StartHeight },
-					new ChainBehavior(_Chain)
-					{
-						CanRespondToGetHeaders = false,
-						SkipPoWCheck = true,
-						StripHeader = true
-					},
+					new ExplorerBehavior(_Repository, _Chain, _AddressPoolService, _EventAggregator) { StartHeight = _ChainConfiguration.StartHeight },
+					new SlimChainBehavior(_Chain),
 					new PingPongBehavior()
 				}
 			});
@@ -403,11 +451,6 @@ namespace NBXplorer
 			group.ConnectedNodes.Removed += ConnectedNodes_Changed;
 		}
 
-		private IPEndPoint GetEndpoint()
-		{
-			return _Configuration.ChainConfigurations.Where(c => c.CryptoCode == Network.CryptoCode).Select(c => c.NodeEndpoint).FirstOrDefault();
-		}
-
 		private static async Task WaitConnected(NodesGroup group)
 		{
 			TaskCompletionSource<bool> tcs = new TaskCompletionSource<bool>();
@@ -428,17 +471,13 @@ namespace NBXplorer
 		private void SaveChainInCache()
 		{
 			var suffix = _Network.CryptoCode == "BTC" ? "" : _Network.CryptoCode;
-			var cachePath = Path.Combine(_Configuration.DataDir, $"{suffix}chain-stripped.dat");
-			var cachePathTemp = Path.Combine(_Configuration.DataDir, $"{suffix}chain-stripped.dat.temp");
+			var cachePath = Path.Combine(_Configuration.DataDir, $"{suffix}chain-slim.dat");
+			var cachePathTemp = Path.Combine(_Configuration.DataDir, $"{suffix}chain-slim.dat.temp");
 
 			Logs.Configuration.LogInformation($"{_Network.CryptoCode}: Saving chain to cache...");
 			using(var fs = new FileStream(cachePathTemp, FileMode.Create, FileAccess.Write, FileShare.None, 1024 * 1024))
 			{
-				_Chain.WriteTo(fs, new ConcurrentChain.ChainSerializationFormat()
-				{
-					SerializeBlockHeader = false,
-					SerializePrecomputedBlockHash = true
-				});
+				_Chain.Save(fs);
 				fs.Flush();
 			}
 
@@ -458,7 +497,7 @@ namespace NBXplorer
 				try
 				{
 					handshakeTimeout.CancelAfter(TimeSpan.FromSeconds(10));
-					using(var node = Node.Connect(_Network.NBitcoinNetwork, GetEndpoint(), new NodeConnectionParameters()
+					using(var node = Node.Connect(_Network.NBitcoinNetwork, _ChainConfiguration.NodeEndpoint, new NodeConnectionParameters()
 					{
 						UserAgent = userAgent,
 						ConnectCancellation = handshakeTimeout.Token,
@@ -471,24 +510,18 @@ namespace NBXplorer
 						if(_Chain.Height < 5)
 							loadChainTimeout = TimeSpan.FromDays(7); // unlimited
 
-						var synchronizeOptions = new SynchronizeChainOptions()
-						{
-							SkipPoWCheck = true,
-							StripHeaders = true
-						};
-
 						try
 						{
 							using(var cts1 = CancellationTokenSource.CreateLinkedTokenSource(cancellation))
 							{
 								cts1.CancelAfter(loadChainTimeout);
-								node.SynchronizeChain(_Chain, synchronizeOptions, cancellationToken: cts1.Token);
+								node.SynchronizeSlimChain(_Chain, cancellationToken: cts1.Token);
 							}
 						}
 						catch // Timeout happens with SynchronizeChain, if so, throw away the cached chain
 						{
-							_Chain.SetTip(_Chain.Genesis);
-							node.SynchronizeChain(_Chain, synchronizeOptions, cancellationToken: cancellation);
+							_Chain.ResetToGenesis();
+							node.SynchronizeSlimChain(_Chain, cancellationToken: cancellation);
 						}
 
 
@@ -519,7 +552,9 @@ namespace NBXplorer
 				if(_Configuration.CacheChain && File.Exists(legacyCachePath))
 				{
 					Logs.Configuration.LogInformation($"{_Network.CryptoCode}: Loading chain from cache...");
-					_Chain.Load(File.ReadAllBytes(legacyCachePath), _Network.NBitcoinNetwork);
+					var chain = new ConcurrentChain(_Network.NBitcoinNetwork);
+					chain.Load(File.ReadAllBytes(legacyCachePath), _Network.NBitcoinNetwork);
+					LoadSlimAndSaveToSlimFormat(chain);
 					File.Delete(legacyCachePath);
 					Logs.Configuration.LogInformation($"{_Network.CryptoCode}: Height: " + _Chain.Height);
 					return;
@@ -531,15 +566,41 @@ namespace NBXplorer
 				if(_Configuration.CacheChain && File.Exists(cachePath))
 				{
 					Logs.Configuration.LogInformation($"{_Network.CryptoCode}: Loading chain from cache...");
-					_Chain.Load(File.ReadAllBytes(cachePath), _Network.NBitcoinNetwork, new ConcurrentChain.ChainSerializationFormat()
+					var chain = new ConcurrentChain(_Network.NBitcoinNetwork);
+					chain.Load(File.ReadAllBytes(cachePath), _Network.NBitcoinNetwork, new ConcurrentChain.ChainSerializationFormat()
 					{
 						SerializeBlockHeader = false,
 						SerializePrecomputedBlockHash = true,
 					});
+					LoadSlimAndSaveToSlimFormat(chain);
+					File.Delete(cachePath);
 					Logs.Configuration.LogInformation($"{_Network.CryptoCode}: Height: " + _Chain.Height);
 					return;
 				}
 			}
+
+			{
+				var slimCachePath = Path.Combine(_Configuration.DataDir, $"{suffix}chain-slim.dat");
+				if(_Configuration.CacheChain && File.Exists(slimCachePath))
+				{
+					Logs.Configuration.LogInformation($"{_Network.CryptoCode}: Loading chain from cache...");
+					using(var file = new FileStream(slimCachePath, FileMode.Open, FileAccess.Read, FileShare.None, 1024 * 1024))
+					{
+						_Chain.Load(file);
+					}
+					Logs.Configuration.LogInformation($"{_Network.CryptoCode}: Height: " + _Chain.Height);
+					return;
+				}
+			}
+		}
+
+		private void LoadSlimAndSaveToSlimFormat(ConcurrentChain chain)
+		{
+			foreach(var block in chain.ToEnumerable(false))
+			{
+				_Chain.TrySetTip(block.HashBlock, block.Previous?.HashBlock);
+			}
+			SaveChainInCache();
 		}
 
 		private async Task<bool> WarmupBlockchain()
@@ -559,7 +620,7 @@ namespace NBXplorer
 				{
 					header = await _RPC.GetBlockHeaderAsync(hash);
 				}
-				catch(RPCException ex) when (ex.RPCCode == RPCErrorCode.RPC_METHOD_NOT_FOUND)
+				catch(RPCException ex) when(ex.RPCCode == RPCErrorCode.RPC_METHOD_NOT_FOUND)
 				{
 					header = (await _RPC.GetBlockAsync(hash)).Header;
 				}
