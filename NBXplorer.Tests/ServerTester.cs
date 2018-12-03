@@ -25,6 +25,10 @@ using NBXplorer.DerivationStrategy;
 
 namespace NBXplorer.Tests
 {
+	public class ServerParams
+	{
+		public string AutoPruning { get; set; }
+	}
 	public partial class ServerTester : IDisposable
 	{
 		private readonly string _Directory;
@@ -36,12 +40,12 @@ namespace NBXplorer.Tests
 
 		public void Dispose()
 		{
-			if(Host != null)
+			if (Host != null)
 			{
 				Host.Dispose();
 				Host = null;
 			}
-			if(NodeBuilder != null)
+			if (NodeBuilder != null)
 			{
 				NodeBuilder.Dispose();
 				NodeBuilder = null;
@@ -63,33 +67,24 @@ namespace NBXplorer.Tests
 				var rootTestData = "TestData";
 				directory = Path.Combine(rootTestData, directory);
 				_Directory = directory;
-				if(!Directory.Exists(rootTestData))
+				if (!Directory.Exists(rootTestData))
 					Directory.CreateDirectory(rootTestData);
 
 				var cryptoSettings = new NBXplorerNetworkProvider(NetworkType.Regtest).GetFromCryptoCode(CryptoCode);
 				NodeBuilder = NodeBuilder.Create(nodeDownloadData, Network, directory);
 
-
-				User1 = NodeBuilder.CreateNode();
-				User2 = NodeBuilder.CreateNode();
 				Explorer = NodeBuilder.CreateNode();
-				foreach(var node in NodeBuilder.Nodes)
+				foreach (var node in NodeBuilder.Nodes)
 				{
 					node.WhiteBind = true;
 					node.CookieAuth = cryptoSettings.SupportCookieAuthentication;
 				}
 				NodeBuilder.StartAll();
-
-				User1.CreateRPCClient().Generate(1);
-				User1.Sync(Explorer, true);
-				Explorer.CreateRPCClient().Generate(1);
-				Explorer.Sync(User2, true);
-				User2.CreateRPCClient().EnsureGenerate(Network.Consensus.CoinbaseMaturity + 1);
-				User1.Sync(User2, true);
+				Explorer.CreateRPCClient().EnsureGenerate(Network.Consensus.CoinbaseMaturity + 1);
 
 				var port = CustomServer.FreeTcpPort();
 				var datadir = Path.Combine(directory, "explorer");
-				DeleteRecursivelyWithMagicDust(datadir);
+				DeleteFolderRecursive(datadir);
 				List<(string key, string value)> keyValues = new List<(string key, string value)>();
 				keyValues.Add(("conf", Path.Combine(directory, "explorer", "settings.config")));
 				keyValues.Add(("datadir", datadir));
@@ -101,8 +96,8 @@ namespace NBXplorer.Tests
 				keyValues.Add(($"{CryptoCode.ToLowerInvariant()}rpcurl", Explorer.CreateRPCClient().Address.AbsoluteUri));
 				keyValues.Add(("cachechain", "0"));
 				keyValues.Add(("rpcnotest", "1"));
-				keyValues.Add(("mingapsize", "2"));
-				keyValues.Add(("maxgapsize", "4"));
+				keyValues.Add(("mingapsize", "3"));
+				keyValues.Add(("maxgapsize", "8"));
 				keyValues.Add(($"{CryptoCode.ToLowerInvariant()}startheight", Explorer.CreateRPCClient().GetBlockCount().ToString()));
 				keyValues.Add(($"{CryptoCode.ToLowerInvariant()}nodeendpoint", $"{Explorer.Endpoint.Address}:{Explorer.Endpoint.Port}"));
 				keyValues.Add(("asbcnstr", AzureServiceBusTestConfig.ConnectionString));
@@ -131,9 +126,11 @@ namespace NBXplorer.Tests
 				Network = nbxnetwork.NBitcoinNetwork;
 				var conf = (ExplorerConfiguration)Host.Services.GetService(typeof(ExplorerConfiguration));
 				Host.Start();
-
+				Configuration = conf;
 				_Client = new ExplorerClient(nbxnetwork, Address);
 				_Client.SetCookieAuth(Path.Combine(conf.DataDir, ".cookie"));
+				Notifications = _Client.CreateLongPollingNotificationSession();
+				this.Client.WaitServerStarted();
 			}
 			catch
 			{
@@ -141,7 +138,7 @@ namespace NBXplorer.Tests
 				throw;
 			}
 		}
-
+		public LongPollingNotificationSession Notifications { get; set; }
 		private NetworkCredential ExtractCredentials(string config)
 		{
 			var user = Regex.Match(config, "rpcuser=([^\r\n]*)");
@@ -159,6 +156,8 @@ namespace NBXplorer.Tests
 			}
 		}
 
+		public ExplorerConfiguration Configuration { get; }
+
 		ExplorerClient _Client;
 		public ExplorerClient Client
 		{
@@ -169,16 +168,6 @@ namespace NBXplorer.Tests
 		}
 
 		public CoreNode Explorer
-		{
-			get; set;
-		}
-
-		public CoreNode User1
-		{
-			get; set;
-		}
-
-		public CoreNode User2
 		{
 			get; set;
 		}
@@ -217,60 +206,46 @@ namespace NBXplorer.Tests
 		{
 			try
 			{
-				DeleteRecursivelyWithMagicDust(directory);
+				DeleteFolderRecursive(directory);
 				return true;
 			}
-			catch(DirectoryNotFoundException)
+			catch (DirectoryNotFoundException)
 			{
 				return true;
 			}
-			catch(Exception)
+			catch (Exception)
 			{
-				if(throws)
+				if (throws)
 					throw;
 			}
 			return false;
 		}
 
-		// http://stackoverflow.com/a/14933880/2061103
-		public static void DeleteRecursivelyWithMagicDust(string destinationDir)
+		public static void DeleteFolderRecursive(string destinationDir)
 		{
-			const int magicDust = 10;
-			for(var gnomes = 1; gnomes <= magicDust; gnomes++)
+			for (var i = 1; i <= 10; i++)
 			{
 				try
 				{
 					Directory.Delete(destinationDir, true);
+					return;
 				}
-				catch(DirectoryNotFoundException)
+				catch (DirectoryNotFoundException)
 				{
-					return;  // good!
+					return;
 				}
-				catch(IOException)
+				catch (IOException)
 				{
-					if(gnomes == magicDust)
-						throw;
-					// System.IO.IOException: The directory is not empty
-					System.Diagnostics.Debug.WriteLine("Gnomes prevent deletion of {0}! Applying magic dust, attempt #{1}.", destinationDir, gnomes);
-
-					// see http://stackoverflow.com/questions/329355/cannot-delete-directory-with-directory-deletepath-true for more magic
-					Thread.Sleep(100 * gnomes);
+					Thread.Sleep(100 * i);
 					continue;
 				}
-				catch(UnauthorizedAccessException)
+				catch (UnauthorizedAccessException)
 				{
-					if(gnomes == magicDust)
-						throw;
-					// Wait, maybe another software make us authorized a little later
-					System.Diagnostics.Debug.WriteLine("Gnomes prevent deletion of {0}! Applying magic dust, attempt #{1}.", destinationDir, gnomes);
-
-					// see http://stackoverflow.com/questions/329355/cannot-delete-directory-with-directory-deletepath-true for more magic
-					Thread.Sleep(100);
+					Thread.Sleep(100 * i);
 					continue;
 				}
-				return;
 			}
-			// depending on your use case, consider throwing an exception here
+			throw new IOException($"Impossible to delete folder {destinationDir}");
 		}
 
 		static void Copy(string sourceDirectory, string targetDirectory)
@@ -286,13 +261,13 @@ namespace NBXplorer.Tests
 			Directory.CreateDirectory(target.FullName);
 
 			// Copy each file into the new directory.
-			foreach(FileInfo fi in source.GetFiles())
+			foreach (FileInfo fi in source.GetFiles())
 			{
 				fi.CopyTo(Path.Combine(target.FullName, fi.Name), true);
 			}
 
 			// Copy each subdirectory using recursion.
-			foreach(DirectoryInfo diSourceSubDir in source.GetDirectories())
+			foreach (DirectoryInfo diSourceSubDir in source.GetDirectories())
 			{
 				DirectoryInfo nextTargetSubDir =
 					target.CreateSubdirectory(diSourceSubDir.Name);
@@ -307,7 +282,7 @@ namespace NBXplorer.Tests
 
 		public BitcoinAddress AddressOf(BitcoinExtKey key, string path)
 		{
-			if(SupportSegwit())
+			if (this.RPC.Capabilities.SupportSegwit)
 				return key.ExtKey.Derive(new KeyPath(path)).Neuter().PubKey.WitHash.GetAddress(Network);
 			else
 				return key.ExtKey.Derive(new KeyPath(path)).Neuter().PubKey.Hash.GetAddress(Network);
@@ -325,41 +300,57 @@ namespace NBXplorer.Tests
 		public DerivationStrategyBase CreateDerivationStrategy(ExtPubKey pubKey, bool p2sh)
 		{
 			pubKey = pubKey ?? new ExtKey().Neuter();
-			string suffix = SupportSegwit() ? "" : "-[legacy]";
+			string suffix = this.RPC.Capabilities.SupportSegwit ? "" : "-[legacy]";
 			suffix += p2sh ? "-[p2sh]" : "";
 			return new DerivationStrategyFactory(this.Network).Parse($"{pubKey.ToString(this.Network)}{suffix}");
 		}
-
-		public bool RPCSupportSegwit
-		{
-			get; set;
-		} = true;
 
 		public bool RPCStringAmount
 		{
 			get; set;
 		} = true;
 
-		public bool SupportSegwit()
-		{
-			return RPCSupportSegwit && Network.Consensus.SupportSegwit;
-		}
-
 		public uint256 SendToAddress(BitcoinAddress address, Money amount)
 		{
 			return SendToAddressAsync(address, amount).GetAwaiter().GetResult();
+		}
+
+		public uint256 SendToAddress(Script scriptPubKey, Money amount)
+		{
+			return SendToAddressAsync(scriptPubKey.GetDestinationAddress(Network), amount).GetAwaiter().GetResult();
+		}
+		public Task<uint256> SendToAddressAsync(Script scriptPubKey, Money amount)
+		{
+			return SendToAddressAsync(scriptPubKey.GetDestinationAddress(Network), amount);
 		}
 
 		public async Task<uint256> SendToAddressAsync(BitcoinAddress address, Money amount)
 		{
 			List<object> parameters = new List<object>();
 			parameters.Add(address.ToString());
-			if(RPCStringAmount)
+			if (RPCStringAmount)
 				parameters.Add(amount.ToString());
 			else
 				parameters.Add(amount.ToDecimal(MoneyUnit.BTC));
 			var resp = await RPC.SendCommandAsync(RPCOperations.sendtoaddress, parameters.ToArray());
 			return uint256.Parse(resp.Result.ToString());
+		}
+
+		internal void WaitSynchronized()
+		{
+			using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+			{
+				while (true)
+				{
+					cts.Token.ThrowIfCancellationRequested();
+					var status = Client.GetStatus();
+					if (status.SyncHeight == status.BitcoinStatus.Blocks)
+					{
+						break;
+					}
+					Thread.Sleep(50);
+				}
+			}
 		}
 	}
 }

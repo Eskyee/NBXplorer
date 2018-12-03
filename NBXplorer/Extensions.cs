@@ -77,53 +77,14 @@ namespace NBXplorer
 			return null;
 		}
 
-		public static IEnumerable<TransactionMatch> GetMatches(this Repository repository, Transaction tx)
+		internal static KeyPathInformation AddAddress(this KeyPathInformation keyPathInformation, Network network)
 		{
-			var matches = new Dictionary<string, TransactionMatch>();
-			HashSet<Script> inputScripts = new HashSet<Script>();
-			HashSet<Script> outputScripts = new HashSet<Script>();
-			HashSet<Script> scripts = new HashSet<Script>();
-			foreach(var input in tx.Inputs)
+			if(keyPathInformation.Address == null)
 			{
-				var signer = input.GetSigner();
-				if(signer != null)
-				{
-					inputScripts.Add(signer.ScriptPubKey);
-					scripts.Add(signer.ScriptPubKey);
-				}
+				keyPathInformation.Address = keyPathInformation.ScriptPubKey.GetDestinationAddress(network).ToString();
 			}
-
-			foreach(var output in tx.Outputs)
-			{
-				outputScripts.Add(output.ScriptPubKey);
-				scripts.Add(output.ScriptPubKey);
-			}
-
-			var keyInformations = repository.GetKeyInformations(scripts.ToArray());
-			foreach(var keyInfoByScripts in keyInformations)
-			{
-				foreach(var keyInfo in keyInfoByScripts.Value)
-				{
-					var matchesGroupingKey = keyInfo.DerivationStrategy?.ToString() ?? keyInfo.ScriptPubKey.ToHex();
-					if (!matches.TryGetValue(matchesGroupingKey, out TransactionMatch match))
-					{
-						match = new TransactionMatch();
-						matches.Add(matchesGroupingKey, match);
-						match.TrackedSource = keyInfo.TrackedSource;
-						match.DerivationStrategy = (keyInfo.TrackedSource as DerivationSchemeTrackedSource)?.DerivationStrategy;
-						match.Transaction = tx;
-					}
-
-					if(outputScripts.Contains(keyInfo.ScriptPubKey))
-						match.Outputs.Add(keyInfo);
-
-					if(inputScripts.Contains(keyInfo.ScriptPubKey))
-						match.Inputs.Add(keyInfo);
-				}
-			}
-			return matches.Values;
+			return keyPathInformation;
 		}
-
 
 		class MVCConfigureOptions : IConfigureOptions<MvcJsonOptions>
 		{
@@ -186,6 +147,8 @@ namespace NBXplorer
 			services.TryAddSingleton<AddressPoolServiceAccessor>();
 			services.AddSingleton<IHostedService, AddressPoolService>();
 			services.TryAddSingleton<BitcoinDWaitersAccessor>();
+			services.AddSingleton<IHostedService, ScanUTXOSetService>();
+			services.TryAddSingleton<ScanUTXOSetServiceAccessor>();
 			services.AddSingleton<IHostedService, BitcoinDWaiters>();
 			services.AddSingleton<IHostedService, BrokerHostedService>();
 
@@ -207,27 +170,6 @@ namespace NBXplorer
 				o.LoadArgs(conf);
 			});
 			return services;
-		}
-
-		internal static string ToPrettyString(this TrackedSource trackedSource)
-		{
-			if (trackedSource is DerivationSchemeTrackedSource derivation)
-			{
-				var strategy = derivation.DerivationStrategy.ToString();
-				if (strategy.Length > 35)
-				{
-					strategy = strategy.Substring(0, 10) + "..." + strategy.Substring(strategy.Length - 20);
-				}
-				return strategy;
-			}
-			else if (trackedSource is AddressTrackedSource addressDerivation)
-			{
-				return addressDerivation.Address.ToString();
-			}
-			else
-			{
-				return trackedSource.ToString();
-			}
 		}
 
 		internal class NoObjectModelValidator : IObjectModelValidator

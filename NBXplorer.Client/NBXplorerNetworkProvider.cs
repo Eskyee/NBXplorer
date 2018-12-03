@@ -10,6 +10,7 @@ namespace NBXplorer
 		public NBXplorerNetworkProvider(NetworkType networkType)
 		{
 			InitBitcoin(networkType);
+			InitBitcore(networkType);
 			InitLitecoin(networkType);
 			InitDogecoin(networkType);
 			InitBCash(networkType);
@@ -21,6 +22,9 @@ namespace NBXplorer
 			InitFeathercoin(networkType);
 			InitUfo(networkType);
 			InitViacoin(networkType);
+			InitMonoeci(networkType);
+			InitGobyte(networkType);
+			InitColossus(networkType);
 			NetworkType = networkType;
 			foreach(var chain in _Networks.Values)
 			{

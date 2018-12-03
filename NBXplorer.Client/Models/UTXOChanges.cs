@@ -60,18 +60,8 @@ namespace NBXplorer.Models
 			}
 		}
 
-		public bool HasChanges
-		{
-			get
-			{
-				return Confirmed.HasChanges || Unconfirmed.HasChanges;
-			}
-		}
-
 		public Coin[] GetUnspentCoins(bool excludeUnconfirmedUTXOs = false)
 		{
-			if (Confirmed.KnownBookmark != null || Unconfirmed.KnownBookmark != null)
-				throw new InvalidOperationException("This UTXOChanges is partial, it is calculate the unspent coins");
 			return GetUnspentUTXOs(excludeUnconfirmedUTXOs).Select(c => c.AsCoin(DerivationStrategy)).ToArray();
 		}
 
@@ -96,32 +86,6 @@ namespace NBXplorer.Models
 	}
 	public class UTXOChange
 	{
-
-		Bookmark _KnownBookmark;
-		public Bookmark KnownBookmark
-		{
-			get
-			{
-				return _KnownBookmark;
-			}
-			set
-			{
-				_KnownBookmark = value;
-			}
-		}
-
-		Bookmark _Bookmark = null;
-		public Bookmark Bookmark
-		{
-			get
-			{
-				return _Bookmark;
-			}
-			set
-			{
-				_Bookmark = value;
-			}
-		}
 
 		List<UTXO> _UTXOs = new List<UTXO>();
 		public List<UTXO> UTXOs
@@ -148,14 +112,6 @@ namespace NBXplorer.Models
 				_SpentOutpoints = value;
 			}
 		}
-
-		public bool HasChanges
-		{
-			get
-			{
-				return KnownBookmark != Bookmark || UTXOs.Count != 0 || SpentOutpoints.Count != 0;
-			}
-		}
 	}
 
 	public class UTXO
@@ -168,11 +124,14 @@ namespace NBXplorer.Models
 		public UTXO(Coin coin)
 		{
 			Outpoint = coin.Outpoint;
+			Index = (int)coin.Outpoint.N;
+			TransactionHash = coin.Outpoint.Hash;
 			Value = coin.TxOut.Value;
 			ScriptPubKey = coin.TxOut.ScriptPubKey;
 		}
 
 		[JsonConverter(typeof(Newtonsoft.Json.Converters.StringEnumConverter))]
+		[JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
 		public DerivationFeature? Feature
 		{
 			get; set;
@@ -210,7 +169,8 @@ namespace NBXplorer.Models
 			}
 		}
 
-
+		public int Index { get; set; }
+		public uint256 TransactionHash { get; set; }
 
 		Script _ScriptPubKey;
 		public Script ScriptPubKey

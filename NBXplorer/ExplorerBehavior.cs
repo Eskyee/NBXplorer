@@ -68,33 +68,27 @@ namespace NBXplorer
 
 		Timer _Timer;
 
-		public BlockLocator CurrentLocation
-		{
-			get
-			{
-				return _CurrentLocation;
-			}
-		}
+		public BlockLocator CurrentLocation { get; private set; }
 
 		protected override void AttachCore()
 		{
-			AttachedNode.UncaughtException += AttachedNode_UncaughtException;
 			AttachedNode.StateChanged += AttachedNode_StateChanged;
 			AttachedNode.MessageReceived += AttachedNode_MessageReceived;
-			_CurrentLocation = Repository.GetIndexProgress() ?? GetDefaultCurrentLocation();
-			var fork = Chain.FindFork(_CurrentLocation);
-			if (fork == null)
-			{
-				_CurrentLocation = GetDefaultCurrentLocation();
-				fork = Chain.FindFork(_CurrentLocation);
-			}
-			Logs.Explorer.LogInformation($"{Network.CryptoCode}: Starting scan at block " + fork.Height);
+			Task.Run(Init);
 			_Timer = new Timer(Tick, null, 0, (int)TimeSpan.FromSeconds(30).TotalMilliseconds);
 		}
 
-		private void AttachedNode_UncaughtException(Node sender, Exception ex)
+		private async Task Init()
 		{
-			Logs.Explorer.LogError(ex, $"{Network.CryptoCode}: Unhandled exception when listening the node");
+			var currentLocation = await Repository.GetIndexProgress() ?? GetDefaultCurrentLocation();
+			var fork = Chain.FindFork(currentLocation);
+			if (fork == null)
+			{
+				currentLocation = GetDefaultCurrentLocation();
+				fork = Chain.FindFork(currentLocation);
+			}
+			CurrentLocation = currentLocation;
+			Logs.Explorer.LogInformation($"{Network.CryptoCode}: Starting scan at block " + fork.Height);
 		}
 
 		private BlockLocator GetDefaultCurrentLocation()
@@ -117,7 +111,9 @@ namespace NBXplorer
 				return;
 			if (_InFlights.Count != 0)
 				return;
-			var currentLocation = _CurrentLocation;
+			var currentLocation = CurrentLocation;
+			if (currentLocation == null)
+				return;
 			var currentBlock = Chain.FindFork(currentLocation);
 			if (currentBlock.Height < StartHeight)
 				currentBlock = Chain.GetBlock(StartHeight) ?? Chain.TipBlock;
@@ -176,11 +172,8 @@ namespace NBXplorer
 			get;
 		}
 
-		BlockLocator _CurrentLocation;
-
 		protected override void DetachCore()
 		{
-			AttachedNode.UncaughtException -= AttachedNode_UncaughtException;
 			AttachedNode.StateChanged -= AttachedNode_StateChanged;
 			AttachedNode.MessageReceived -= AttachedNode_MessageReceived;
 
@@ -190,7 +183,7 @@ namespace NBXplorer
 
 		private void AttachedNode_MessageReceived(Node node, IncomingMessage message)
 		{
-			message.Message.IfPayloadIs<InvPayload>(invs =>
+			if (message.Message.Payload is InvPayload invs)
 			{
 				var data = new GetDataPayload();
 				foreach (var inv in invs.Inventory)
@@ -201,76 +194,117 @@ namespace NBXplorer
 				}
 				if (data.Inventory.Count != 0)
 					node.SendMessageAsync(data);
-			});
-
-			message.Message.IfPayloadIs<HeadersPayload>(headers =>
+			}
+			else if (message.Message.Payload is HeadersPayload headers)
 			{
 				if (headers.Headers.Count == 0)
 					return;
 				AskBlocks();
-			});
-
-			message.Message.IfPayloadIs<BlockPayload>(block =>
+			}
+			else if (message.Message.Payload is BlockPayload block)
 			{
-				block.Object.Header.PrecomputeHash(false, false);
-				Download o;
-				if (_InFlights.ContainsKey(block.Object.GetHash()))
-				{
-					var currentLocation = Chain.GetLocator(block.Object.GetHash());
-					if (currentLocation == null)
-						return;
-					_CurrentLocation = currentLocation;
-					if (_InFlights.TryRemove(block.Object.GetHash(), out o))
-					{
-						foreach (var tx in block.Object.Transactions)
-							tx.PrecomputeHash(false, true);
-
-						var matches =
-							block.Object.Transactions
-							.SelectMany(tx => Repository.GetMatches(tx))
-							.ToArray();
-
-						var blockHash = block.Object.GetHash();
-						SaveMatches(matches, blockHash);
-						//Save index progress everytimes if not synching, or once every 100 blocks otherwise
-						if (!IsSynching() || blockHash.GetLow32() % 100 == 0)
-							Repository.SetIndexProgress(currentLocation);
-						_EventAggregator.Publish(new Events.NewBlockEvent(this._Repository.Network.CryptoCode, blockHash));
-					}
-					if (_InFlights.Count == 0)
-						AskBlocks();
-				}
-			});
-
-			message.Message.IfPayloadIs<TxPayload>(txPayload =>
+				Task.Run(() => SaveMatches(block.Object));
+			}
+			else if (message.Message.Payload is TxPayload txPayload)
 			{
-				var matches = Repository.GetMatches(txPayload.Object).ToArray();
-				SaveMatches(matches, null);
-			});
-
-		}
-
-		private void SaveMatches(TransactionMatch[] matches, uint256 blockHash)
-		{
-			DateTimeOffset now = DateTimeOffset.UtcNow;
-			var matchedTransactions = matches.Select(m => new MatchedTransaction()
-			{
-				BlockId = blockHash,
-				Match = m,
-			}).ToArray();
-			Repository.SaveMatches(now, matchedTransactions);
-			AddressPoolService.RefillAddressPoolIfNeeded(Network, matchedTransactions);
-			var saved = Repository.SaveTransactions(now, matches.Select(m => m.Transaction).Distinct().ToArray(), blockHash);
-			var savedTransactions = saved.ToDictionary(s => s.Transaction.GetHash());
-			for (int i = 0; i < matches.Length; i++)
-			{
-				_EventAggregator.Publish(new NewTransactionMatchEvent(this._Repository.Network.CryptoCode, blockHash, matches[i], savedTransactions[matches[i].Transaction.GetHash()]));
+				Task.Run(() => SaveMatches(txPayload.Object));
 			}
 		}
 
+		private async Task SaveMatches(Block block)
+		{
+			block.Header.PrecomputeHash(false, false);
+			Download o;
+			if (_InFlights.ContainsKey(block.GetHash()))
+			{
+				var currentLocation = Chain.GetLocator(block.GetHash());
+				if (currentLocation == null)
+					return;
+				CurrentLocation = currentLocation;
+				if (_InFlights.TryRemove(block.GetHash(), out o))
+				{
+					foreach (var tx in block.Transactions)
+						tx.PrecomputeHash(false, true);
+
+					var blockHash = block.GetHash();
+					DateTimeOffset now = DateTimeOffset.UtcNow;
+					var matches =
+						block.Transactions
+						.Select(tx => Repository.GetMatches(tx, blockHash, now))
+						.ToArray();
+					await Task.WhenAll(matches);
+					await SaveMatches(matches.SelectMany((Task<TrackedTransaction[]> m) => m.GetAwaiter().GetResult()).ToArray(), blockHash, now);
+					//Save index progress everytimes if not synching, or once every 100 blocks otherwise
+					if (!IsSynching() || blockHash.GetLow32() % 100 == 0)
+						await Repository.SetIndexProgress(currentLocation);
+					var slimBlockHeader = Chain.GetBlock(blockHash);
+					if (slimBlockHeader != null)
+					{
+						var blockEvent = new Models.NewBlockEvent()
+						{
+							CryptoCode = _Repository.Network.CryptoCode,
+							Hash = blockHash,
+							Height = slimBlockHeader.Height,
+							PreviousBlockHash = slimBlockHeader.Previous
+						};
+						var saving = Repository.SaveEvent(blockEvent);
+						_EventAggregator.Publish(blockEvent);
+						await saving;
+					}
+				}
+				if (_InFlights.Count == 0)
+					AskBlocks();
+			}
+		}
+
+		private async Task SaveMatches(Transaction transaction)
+		{
+			var now = DateTimeOffset.UtcNow;
+			var matches = (await Repository.GetMatches(transaction, null, now)).ToArray();
+			await SaveMatches(matches, null, now);
+		}
+
+		private async Task SaveMatches(TrackedTransaction[] matches, uint256 blockHash, DateTimeOffset now)
+		{
+			await Repository.SaveMatches(matches);
+			AddressPoolService.RefillAddressPoolIfNeeded(Network, matches);
+			var saved = await Repository.SaveTransactions(now, matches.Select(m => m.Transaction).Distinct().ToArray(), blockHash);
+			var savedTransactions = saved.ToDictionary(s => s.Transaction.GetHash());
+
+			int? maybeHeight = null;
+			var chainHeight = Chain.Height;
+			if (blockHash != null && Chain.TryGetHeight(blockHash, out int height))
+			{
+				maybeHeight = height;
+			}
+			Task[] saving = new Task[matches.Length];
+			for (int i = 0; i < matches.Length; i++)
+			{
+				var txEvt = new Models.NewTransactionEvent()
+				{
+					TrackedSource = matches[i].TrackedSource,
+					DerivationStrategy = (matches[i].TrackedSource is DerivationSchemeTrackedSource dsts) ? dsts.DerivationStrategy : null,
+					CryptoCode = Network.CryptoCode,
+					BlockId = blockHash,
+					TransactionData = new TransactionResult()
+					{
+						BlockId = blockHash,
+						Height = maybeHeight,
+						Confirmations = maybeHeight == null ? 0 : chainHeight - maybeHeight.Value + 1,
+						Timestamp = now,
+						Transaction = matches[i].Transaction,
+						TransactionHash = matches[i].TransactionHash
+					},
+					Outputs = matches[i].GetReceivedOutputs().ToList()
+				};
+				saving[i] = Repository.SaveEvent(txEvt);
+				_EventAggregator.Publish(txEvt);
+			}
+			await Task.WhenAll(saving);
+		}
 		public bool IsSynching()
 		{
-			var location = _CurrentLocation;
+			var location = CurrentLocation;
 			if (location == null)
 				return true;
 			var fork = Chain.FindFork(location);

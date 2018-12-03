@@ -88,9 +88,14 @@ namespace NBXplorer.Models
 				throw new ArgumentException(paramName: nameof(scriptPubKey), message: $"{nameof(scriptPubKey)} can't be translated on an address on {network.Name}");
 			return new AddressTrackedSource(address);
 		}
+
+		public virtual string ToPrettyString()
+		{
+			return ToString();
+		}
 	}
 
-	public class AddressTrackedSource : TrackedSource
+	public class AddressTrackedSource : TrackedSource, IDestination
 	{
 		// Note that we should in theory access BitcoinAddress. But parsing BitcoinAddress is very expensive, so we keep storing plain strings
 		public AddressTrackedSource(BitcoinAddress address)
@@ -107,6 +112,8 @@ namespace NBXplorer.Models
 		{
 			get;
 		}
+
+		public Script ScriptPubKey => Address.ScriptPubKey;
 
 		public static bool TryParse(ReadOnlySpan<char> strSpan, out TrackedSource addressTrackedSource, Network network)
 		{
@@ -128,6 +135,11 @@ namespace NBXplorer.Models
 		public override string ToString()
 		{
 			return _FullAddressString;
+		}
+
+		public override string ToPrettyString()
+		{
+			return Address.ToString();
 		}
 	}
 
@@ -164,6 +176,15 @@ namespace NBXplorer.Models
 		public override string ToString()
 		{
 			return "DERIVATIONSCHEME:" + DerivationStrategy.ToString();
+		}
+		public override string ToPrettyString()
+		{
+			var strategy = DerivationStrategy.ToString();
+			if (strategy.Length > 35)
+			{
+				strategy = strategy.Substring(0, 10) + "..." + strategy.Substring(strategy.Length - 20);
+			}
+			return strategy;
 		}
 	}
 }

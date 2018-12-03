@@ -7,9 +7,16 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "NBXplorer", "NBXplorer\NBXp
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "NBXplorer.Tests", "NBXplorer.Tests\NBXplorer.Tests.csproj", "{F1F294B4-C7B2-439E-90B6-9A90815B0D51}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NBXplorer.Client", "NBXplorer.Client\NBXplorer.Client.csproj", "{D62CE99D-C25A-407F-8104-0BEFD12A3B5D}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "NBXplorer.Client", "NBXplorer.Client\NBXplorer.Client.csproj", "{D62CE99D-C25A-407F-8104-0BEFD12A3B5D}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NBXplorer.NodeWaiter", "NBXplorer.NodeWaiter\NBXplorer.NodeWaiter.csproj", "{25C147ED-D4CD-4528-A5BD-EBA5258BE916}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "NBXplorer.NodeWaiter", "NBXplorer.NodeWaiter\NBXplorer.NodeWaiter.csproj", "{25C147ED-D4CD-4528-A5BD-EBA5258BE916}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "SolutionFiles", "SolutionFiles", "{E5A765B1-3F91-4D13-9501-EED582AD2BDB}"
+	ProjectSection(SolutionItems) = preProject
+		.circleci\config.yml = .circleci\config.yml
+		Dockerfile.linuxamd64 = Dockerfile.linuxamd64
+		Dockerfile.linuxarm32v7 = Dockerfile.linuxarm32v7
+	EndProjectSection
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

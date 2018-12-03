@@ -17,11 +17,13 @@ namespace NBXplorer
 				return _Network;
 			}
 		}
-		JsonSerializerSettings _Settings = new JsonSerializerSettings();
+
+		public JsonSerializerSettings Settings { get; } = new JsonSerializerSettings();
+
 		public Serializer(Network network)
 		{
 			_Network = network;
-			ConfigureSerializer(_Settings);
+			ConfigureSerializer(Settings);
 		}
 
 		public void ConfigureSerializer(JsonSerializerSettings settings)
@@ -30,18 +32,17 @@ namespace NBXplorer
 				throw new ArgumentNullException(nameof(settings));
 			NBitcoin.JsonConverters.Serializer.RegisterFrontConverters(settings, Network);
 			settings.Converters.Insert(0, new JsonConverters.CachedSerializer(Network));
-			settings.Converters.Insert(0, new JsonConverters.BookmarkJsonConverter());
 			settings.Converters.Insert(0, new JsonConverters.FeeRateJsonConverter());
 		}
 
 		public T ToObject<T>(string str)
 		{
-			return JsonConvert.DeserializeObject<T>(str, _Settings);
+			return JsonConvert.DeserializeObject<T>(str, Settings);
 		}
 
 		public string ToString<T>(T obj)
 		{
-			return JsonConvert.SerializeObject(obj, _Settings);
+			return JsonConvert.SerializeObject(obj, Settings);
 		}
 	}
 }

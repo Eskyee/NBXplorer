@@ -40,36 +40,22 @@ namespace NBXplorer
 	/// </summary>
 	public class UTXOStateResult
 	{
-		public static UTXOStateResult CreateStates(
-			Func<Script[], bool[]> matchScript,
-			HashSet<Bookmark> knownUnconfBookmarks, IEnumerable<Transaction> unconfirmed,
-			HashSet<Bookmark> knownConfBookmarks, IEnumerable<Transaction> confirmed)
+		public static UTXOStateResult CreateStates(IEnumerable<TrackedTransaction> unconfirmed, IEnumerable<TrackedTransaction> confirmed)
 		{
 			var utxoState = new UTXOState();
-			utxoState.MatchScript = matchScript;
 
-			var knownConf = knownConfBookmarks.Contains(Bookmark.Start) ? new UTXOState() : null;
 			foreach(var tx in confirmed)
 			{
 				if(utxoState.Apply(tx) == ApplyTransactionResult.Conflict)
 					throw new InvalidOperationException("Conflict in UTXOStateResult.CreateStates should never happen");
-				if(knownConfBookmarks.Contains(utxoState.CurrentBookmark))
-					knownConf = utxoState.Snapshot();
 			}
 
 
 			var actualConf = utxoState.Snapshot();
-			utxoState.ResetEvents();
-
-			var knownUnconf = knownUnconfBookmarks.Contains(Bookmark.Start) ? utxoState.Snapshot() : null;
 			foreach(var tx in unconfirmed)
 			{
-				var txid = tx.GetHash();
 				if(utxoState.Apply(tx) == ApplyTransactionResult.Conflict)
 					throw new InvalidOperationException("Conflict in UTXOStateResult.CreateStates should never happen");
-
-				if(knownUnconfBookmarks.Contains(utxoState.CurrentBookmark))
-					knownUnconf = utxoState.Snapshot();
 			}
 
 			var actualUnconf = utxoState;
@@ -78,12 +64,10 @@ namespace NBXplorer
 			{
 				Unconfirmed = new UTXOStates()
 				{
-					Known = knownUnconf,
 					Actual = actualUnconf
 				},
 				Confirmed = new UTXOStates()
 				{
-					Known = knownConf,
 					Actual = actualConf,
 				}
 			};
