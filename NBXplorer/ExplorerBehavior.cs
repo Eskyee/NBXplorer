@@ -74,7 +74,7 @@ namespace NBXplorer
 		{
 			AttachedNode.StateChanged += AttachedNode_StateChanged;
 			AttachedNode.MessageReceived += AttachedNode_MessageReceived;
-			Task.Run(Init);
+			Run(Init);
 			_Timer = new Timer(Tick, null, 0, (int)TimeSpan.FromSeconds(30).TotalMilliseconds);
 		}
 
@@ -139,6 +139,8 @@ namespace NBXplorer
 				Repository.BatchSize = invs.Count == maxConcurrentBlocks ? int.MaxValue : 100;
 				_HighestInFlight = Chain.GetLocator(invs[invs.Count - 1].Hash);
 				node.SendMessageAsync(new GetDataPayload(invs.ToArray()));
+				if (invs.Count > 1)
+					GC.Collect(); // Let's collect memory if we are synching 
 			}
 		}
 
