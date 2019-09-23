@@ -27,7 +27,7 @@ namespace NBXplorer.Configuration
 			get;
 			internal set;
 		}
-		public IPEndPoint NodeEndpoint
+		public EndPoint NodeEndpoint
 		{
 			get;
 			internal set;
@@ -60,7 +60,7 @@ namespace NBXplorer.Configuration
 		{
 			get; set;
 		}
-
+		public string SignalFilesDir { get; set; }
 		public NBXplorerNetworkProvider NetworkProvider
 		{
 			get; set;
@@ -115,14 +115,25 @@ namespace NBXplorer.Configuration
 					chainConfiguration.CryptoCode = network.CryptoCode;
 
 					var args = RPCArgs.Parse(config, network.NBitcoinNetwork, network.CryptoCode);
+
 					chainConfiguration.RPC = args.ConfigureRPCClient(network);
+					if (chainConfiguration.RPC.Address.Port == network.NBitcoinNetwork.DefaultPort)
+					{
+						Logs.Configuration.LogWarning($"{network.CryptoCode}: It seems that the RPC port ({chainConfiguration.RPC.Address.Port}) is equal to the default P2P port ({network.NBitcoinNetwork.DefaultPort}), this is probably a misconfiguration.");
+					}
 					if((chainConfiguration.RPC.CredentialString.CookieFile != null || chainConfiguration.RPC.CredentialString.UseDefault) && !network.SupportCookieAuthentication)
 					{
 						throw new ConfigException($"Chain {network.CryptoCode} does not support cookie file authentication,\n" +
 							$"Please use {network.CryptoCode.ToLowerInvariant()}rpcuser and {network.CryptoCode.ToLowerInvariant()}rpcpassword settings in NBXplorer" +
 							$"And configure rpcuser and rpcpassword in the configuration file or in commandline or your node");
 					}
-					chainConfiguration.NodeEndpoint = DefaultConfiguration.ConvertToEndpoint(config.GetOrDefault<string>($"{network.CryptoCode}.node.endpoint", "127.0.0.1"), network.NBitcoinNetwork.DefaultPort);
+					chainConfiguration.NodeEndpoint = NBitcoin.Utils.ParseEndpoint(config.GetOrDefault<string>($"{network.CryptoCode}.node.endpoint", "127.0.0.1"), network.NBitcoinNetwork.DefaultPort);
+
+					if (GetPort(chainConfiguration.NodeEndpoint) == network.NBitcoinNetwork.RPCPort)
+					{
+						Logs.Configuration.LogWarning($"{network.CryptoCode}: It seems that the node endpoint port ({GetPort(chainConfiguration.NodeEndpoint)}) is equal to the default RPC port ({network.NBitcoinNetwork.RPCPort}), this is probably a misconfiguration.");
+					}
+
 					chainConfiguration.StartHeight = config.GetOrDefault<int>($"{network.CryptoCode}.startheight", -1);
 
 					ChainConfigurations.Add(chainConfiguration);
@@ -143,10 +154,24 @@ namespace NBXplorer.Configuration
 			if(!Directory.Exists(BaseDataDir))
 				Directory.CreateDirectory(BaseDataDir);
 			DataDir = Path.Combine(BaseDataDir, NBXplorerDefaultSettings.GetFolderName(NetworkProvider.NetworkType));
-			if(!Directory.Exists(DataDir))
+			if (!Directory.Exists(DataDir))
 				Directory.CreateDirectory(DataDir);
+			SignalFilesDir = config.GetOrDefault<string>("signalfilesdir", null);
+			SignalFilesDir = SignalFilesDir ?? DataDir;
+			if (!Directory.Exists(SignalFilesDir))
+				Directory.CreateDirectory(SignalFilesDir);
 			CacheChain = config.GetOrDefault<bool>("cachechain", true);
 			NoAuthentication = config.GetOrDefault<bool>("noauth", false);
+
+			var customKeyPathTemplate = config.GetOrDefault<string>("customkeypathtemplate", null);
+			if (!string.IsNullOrEmpty(customKeyPathTemplate))
+			{
+				if (!KeyPathTemplate.TryParse(customKeyPathTemplate, out var v))
+					throw new ConfigException("Invalid customKeyPathTemplate");
+				if (v.PostIndexes.IsHardened || v.PreIndexes.IsHardened)
+					throw new ConfigException("customKeyPathTemplate should not be an hardened path");
+				CustomKeyPathTemplate = v;
+			}
 
 			AzureServiceBusConnectionString = config.GetOrDefault<string>("asbcnstr", "");
 			AzureServiceBusBlockQueue = config.GetOrDefault<string>("asbblockq", "");
@@ -155,6 +180,15 @@ namespace NBXplorer.Configuration
 			AzureServiceBusTransactionTopic = config.GetOrDefault<string>("asbtrant", "");
 
 			return this;
+		}
+
+		private int GetPort(EndPoint nodeEndpoint)
+		{
+			if (nodeEndpoint is IPEndPoint endPoint)
+				return endPoint.Port;
+			else if (nodeEndpoint is DnsEndPoint dnsEndPoint)
+				return dnsEndPoint.Port;
+			throw new NotSupportedException();
 		}
 
 		public bool Supports(NBXplorerNetwork network)
@@ -200,5 +234,6 @@ namespace NBXplorer.Configuration
 			get;
 			set;
 		}
+		public KeyPathTemplate CustomKeyPathTemplate { get; set; }
 	}
 }

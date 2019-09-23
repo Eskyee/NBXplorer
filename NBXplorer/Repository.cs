@@ -1,4 +1,4 @@
-﻿using DBreeze;
+﻿using DBriize;
 using Microsoft.Extensions.Logging;
 using System.Linq;
 using NBitcoin;
@@ -15,10 +15,10 @@ using NBXplorer.Models;
 using System.Threading.Tasks;
 using System.Threading;
 using NBitcoin.DataEncoders;
-using DBreeze.Utils;
+using DBriize.Utils;
 using System.Runtime.Serialization;
 using Newtonsoft.Json;
-using DBreeze.Exceptions;
+using DBriize.Exceptions;
 using NBXplorer.Logging;
 using NBXplorer.Configuration;
 using static NBXplorer.RepositoryProvider;
@@ -27,261 +27,80 @@ using Newtonsoft.Json.Linq;
 
 namespace NBXplorer
 {
-	public class RepositoryProvider : IDisposable
+	public class GenerateAddressQuery
 	{
-		internal class CustomThreadPool
+		public GenerateAddressQuery()
 		{
-			CancellationTokenSource _Cancel = new CancellationTokenSource();
-			TaskCompletionSource<bool> _Exited;
-			int _ExitedCount = 0;
-			Thread[] _Threads;
-			Exception _UnhandledException;
-			BlockingCollection<(Action, TaskCompletionSource<object>)> _Actions = new BlockingCollection<(Action, TaskCompletionSource<object>)>(new ConcurrentQueue<(Action, TaskCompletionSource<object>)>());
 
-			public CustomThreadPool(int threadCount, string threadName)
-			{
-				if (threadCount <= 0)
-					throw new ArgumentOutOfRangeException(nameof(threadCount));
-				_Exited = new TaskCompletionSource<bool>();
-				_Threads = Enumerable.Range(0, threadCount).Select(_ => new Thread(RunLoop) { Name = threadName }).ToArray();
-				foreach (var t in _Threads)
-					t.Start();
-			}
-
-			public async Task<T> DoAsync<T>(Func<T> act)
-			{
-				TaskCompletionSource<object> done = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
-				_Actions.Add((() =>
-				{
-					try
-					{
-						done.TrySetResult(act());
-					}
-					catch (Exception ex) { done.TrySetException(ex); }
-				}
-				, done));
-				return (T)(await done.Task.ConfigureAwait(false));
-			}
-
-			public Task DoAsync(Action act)
-			{
-				return DoAsync<object>(() =>
-				{
-					act();
-					return null;
-				});
-			}
-
-			void RunLoop()
-			{
-				try
-				{
-					foreach (var act in _Actions.GetConsumingEnumerable(_Cancel.Token))
-					{
-						act.Item1();
-					}
-				}
-				catch (OperationCanceledException) when (_Cancel.IsCancellationRequested) { }
-				catch (Exception ex)
-				{
-					_Cancel.Cancel();
-					_UnhandledException = ex;
-					Logs.Explorer.LogError(ex, "Unexpected exception thrown by Repository");
-				}
-				if (Interlocked.Increment(ref _ExitedCount) == _Threads.Length)
-				{
-					foreach (var action in _Actions)
-					{
-						try
-						{
-							action.Item2.TrySetCanceled();
-						}
-						catch { }
-					}
-					_Exited.TrySetResult(true);
-				}
-			}
-
-			public async Task DisposeAsync()
-			{
-				_Cancel.Cancel();
-				await _Exited.Task;
-			}
 		}
-		internal class EngineAccessor
+		public GenerateAddressQuery(int? minAddresses, int? maxAddresses)
 		{
-			private DBreezeEngine _Engine;
-			private CustomThreadPool _Pool;
-			Timer _Renew;
-			string directory;
-			public EngineAccessor(string directory)
-			{
-				this.directory = directory;
-				_Pool = new CustomThreadPool(1, "Repository");
-				_Renew = new Timer(async (o) =>
-				{
-					try
-					{
-						await RenewEngineAsync();
-					}
-					catch { }
-				});
-				_Renew.Change(0, (int)TimeSpan.FromSeconds(60).TotalMilliseconds);
-			}
-
-			private Task RenewEngineAsync()
-			{
-				return _Pool.DoAsync(() =>
-				{
-					RenewEngineCore();
-				});
-			}
-
-			private void RenewEngineCore()
-			{
-				DisposeEngine();
-				int tried = 0;
-				while (true)
-				{
-					try
-					{
-						_Engine = new DBreezeEngine(directory);
-						break;
-					}
-					catch when (tried < 10)
-					{
-						tried++;
-						Thread.Sleep(tried * 500);
-					}
-				}
-				_Tx = _Engine.GetTransaction();
-			}
-
-			private void DisposeEngine()
-			{
-				if (_Tx != null)
-				{
-					try
-					{
-						_Tx.Dispose();
-					}
-					catch { }
-					_Tx = null;
-				}
-				if (_Engine != null)
-				{
-					try
-					{
-						_Engine.Dispose();
-					}
-					catch { }
-					_Engine = null;
-				}
-			}
-
-			DBreeze.Transactions.Transaction _Tx;
-
-			void RetryIfFailed(Action act)
-			{
-				try
-				{
-					act();
-				}
-				catch (Exception ex)
-				{
-					Logs.Explorer.LogError(ex, "Unexpected DBreeze error");
-					RenewEngineCore();
-					act();
-				}
-			}
-
-			T RetryIfFailed<T>(Func<T> act)
-			{
-				try
-				{
-					return act();
-				}
-				catch (DBreezeException)
-				{
-					RenewEngineCore();
-					return act();
-				}
-			}
-
-			public Task DoAsync(Action<DBreeze.Transactions.Transaction> act)
-			{
-				AssertNotDisposed();
-				return _Pool.DoAsync(() =>
-				{
-					AssertNotDisposed();
-					if (_Engine == null)
-						RenewEngineCore();
-					RetryIfFailed(() =>
-					{
-						act(_Tx);
-					});
-				});
-			}
-
-			public Task<T> DoAsync<T>(Func<DBreeze.Transactions.Transaction, T> act)
-			{
-				AssertNotDisposed();
-				return _Pool.DoAsync(() =>
-				{
-					AssertNotDisposed();
-					if (_Engine == null)
-						RenewEngineCore();
-					return RetryIfFailed(() =>
-					{
-						return act(_Tx);
-					});
-				});
-			}
-
-			void AssertNotDisposed()
-			{
-				if (_Disposed)
-					throw new ObjectDisposedException("EngineAccessor");
-			}
-			bool _Disposed;
-			public async Task DisposeAsync()
-			{
-				if (!_Disposed)
-				{
-					_Disposed = true;
-					if (_Renew != null)
-						_Renew.Dispose();
-					await _Pool.DoAsync(() => DisposeEngine());
-					await _Pool.DisposeAsync();
-				}
-			}
+			MinAddresses = minAddresses;
+			MaxAddresses = maxAddresses;
 		}
-
-		EngineAccessor _Engine;
+		public int? MinAddresses { get; set; }
+		public int? MaxAddresses { get; set; }
+	}
+	public class RepositoryProvider
+	{
+		DBriizeEngine _Engine;
 		Dictionary<string, Repository> _Repositories = new Dictionary<string, Repository>();
-
-		public RepositoryProvider(NBXplorerNetworkProvider networks, ExplorerConfiguration configuration)
+		private readonly KeyPathTemplates keyPathTemplates;
+		ExplorerConfiguration _Configuration;
+		public RepositoryProvider(NBXplorerNetworkProvider networks, KeyPathTemplates keyPathTemplates, ExplorerConfiguration configuration)
 		{
+			this.keyPathTemplates = keyPathTemplates;
+			_Configuration = configuration;
 			var directory = Path.Combine(configuration.DataDir, "db");
 			if (!Directory.Exists(directory))
 				Directory.CreateDirectory(directory);
-			_Engine = new EngineAccessor(directory);
+
+			int tried = 0;
+		retry:
+			try
+			{
+				_Engine = new DBriizeEngine(directory);
+			}
+			catch when (tried < 10)
+			{
+				tried++;
+				Thread.Sleep(tried * 500);
+				goto retry;
+			}
 			foreach (var net in networks.GetAll())
 			{
-				var settings = configuration.ChainConfigurations.FirstOrDefault(c => c.CryptoCode == net.CryptoCode);
+				var settings = GetChainSetting(net);
 				if (settings != null)
 				{
-					var repo = new Repository(_Engine, net);
+					var repo = new Repository(_Engine, net, keyPathTemplates);
 					repo.MaxPoolSize = configuration.MaxGapSize;
 					repo.MinPoolSize = configuration.MinGapSize;
 					_Repositories.Add(net.CryptoCode, repo);
-					if (settings.Rescan)
-					{
-						Logs.Configuration.LogInformation($"{net.CryptoCode}: Rescanning the chain...");
-						repo.SetIndexProgress(null);
-					}
 				}
 			}
+		}
+
+		private ChainConfiguration GetChainSetting(NBXplorerNetwork net)
+		{
+			return _Configuration.ChainConfigurations.FirstOrDefault(c => c.CryptoCode == net.CryptoCode);
+		}
+
+		public async Task StartAsync()
+		{
+			await Task.WhenAll(_Repositories.Select(kv => kv.Value.StartAsync()).ToArray());
+			foreach	(var repo in _Repositories.Select(kv => kv.Value))
+			{
+				if(GetChainSetting(repo.Network) is ChainConfiguration chainConf && chainConf.Rescan)
+				{
+					Logs.Configuration.LogInformation($"{repo.Network.CryptoCode}: Rescanning the chain...");
+					await repo.SetIndexProgress(null);
+				}
+			}
+		}
+
+		public IEnumerable<Repository> GetAll()
+		{
+			return _Repositories.Values;
 		}
 
 		public Repository GetRepository(NBXplorerNetwork network)
@@ -290,9 +109,10 @@ namespace NBXplorer
 			return repository;
 		}
 
-		public void Dispose()
+		public async Task DisposeAsync()
 		{
-			Task.Run(_Engine.DisposeAsync);
+			await Task.WhenAll(_Repositories.Select(kv => kv.Value.DisposeAsync()).ToArray());
+			_Engine.Dispose();
 		}
 	}
 
@@ -302,7 +122,7 @@ namespace NBXplorer
 
 		public async Task Ping()
 		{
-			await _Engine.DoAsync((tx) =>
+			await _TxContext.DoAsync((tx) =>
 			{
 			});
 		}
@@ -311,14 +131,14 @@ namespace NBXplorer
 		{
 			if (keyPaths.Length == 0)
 				return;
-			await _Engine.DoAsync(tx =>
+			await _TxContext.DoAsync(tx =>
 			{
 				bool needCommit = false;
-				var featuresPerKeyPaths = Enum.GetValues(typeof(DerivationFeature)).Cast<DerivationFeature>()
-				.Select(f => (Feature: f, Path: DerivationStrategyBase.GetKeyPath(f)))
-				.ToDictionary(o => o.Path, o => o.Feature);
+				var featuresPerKeyPaths = keyPathTemplates.GetSupportedDerivationFeatures()
+				.Select(f => (Feature: f, KeyPathTemplate: keyPathTemplates.GetKeyPathTemplate(f)))
+				.ToDictionary(o => o.KeyPathTemplate, o => o.Feature);
 
-				var groups = keyPaths.Where(k => k.Indexes.Length > 0).GroupBy(k => k.Parent);
+				var groups = keyPaths.Where(k => k.Indexes.Length > 0).GroupBy(k => keyPathTemplates.GetKeyPathTemplate(k));
 				foreach (var group in groups)
 				{
 					if (featuresPerKeyPaths.TryGetValue(group.Key, out DerivationFeature feature))
@@ -344,8 +164,8 @@ namespace NBXplorer
 
 		class Index
 		{
-			DBreeze.Transactions.Transaction tx;
-			public Index(DBreeze.Transactions.Transaction tx, string tableName, string primaryKey)
+			DBriize.Transactions.Transaction tx;
+			public Index(DBriize.Transactions.Transaction tx, string tableName, string primaryKey)
 			{
 				TableName = tableName;
 				PrimaryKey = primaryKey;
@@ -451,37 +271,43 @@ namespace NBXplorer
 			}
 		}
 
-		Index GetAvailableKeysIndex(DBreeze.Transactions.Transaction tx, DerivationStrategyBase trackedSource, DerivationFeature feature)
+		Index GetAvailableKeysIndex(DBriize.Transactions.Transaction tx, DerivationStrategyBase trackedSource, DerivationFeature feature)
 		{
 			return new Index(tx, $"{_Suffix}AvailableKeys", $"{trackedSource.GetHash()}-{feature}");
 		}
 
-		Index GetScriptsIndex(DBreeze.Transactions.Transaction tx, Script scriptPubKey)
+		Index GetScriptsIndex(DBriize.Transactions.Transaction tx, Script scriptPubKey)
 		{
 			return new Index(tx, $"{_Suffix}Scripts", $"{scriptPubKey.Hash}");
 		}
 
-		Index GetHighestPathIndex(DBreeze.Transactions.Transaction tx, DerivationStrategyBase strategy, DerivationFeature feature)
+		Index GetHighestPathIndex(DBriize.Transactions.Transaction tx, DerivationStrategyBase strategy, DerivationFeature feature)
 		{
 			return new Index(tx, $"{_Suffix}HighestPath", $"{strategy.GetHash()}-{feature}");
 		}
 
-		Index GetReservedKeysIndex(DBreeze.Transactions.Transaction tx, DerivationStrategyBase strategy, DerivationFeature feature)
+		Index GetReservedKeysIndex(DBriize.Transactions.Transaction tx, DerivationStrategyBase strategy, DerivationFeature feature)
 		{
 			return new Index(tx, $"{_Suffix}ReservedKeys", $"{strategy.GetHash()}-{feature}");
 		}
 
-		Index GetTransactionsIndex(DBreeze.Transactions.Transaction tx, TrackedSource trackedSource)
+		Index GetTransactionsIndex(DBriize.Transactions.Transaction tx, TrackedSource trackedSource)
 		{
 			return new Index(tx, $"{_Suffix}Transactions", $"{trackedSource.GetHash()}");
 		}
 
-		Index GetEventsIndex(DBreeze.Transactions.Transaction tx)
+		Index GetMetadataIndex(DBriize.Transactions.Transaction tx, TrackedSource trackedSource)
+		{
+			return new Index(tx, $"{_Suffix}Metadata", $"{trackedSource.GetHash()}");
+		}
+
+		Index GetEventsIndex(DBriize.Transactions.Transaction tx)
 		{
 			return new Index(tx, $"{_Suffix}Events", string.Empty);
 		}
 
 		NBXplorerNetwork _Network;
+		private readonly KeyPathTemplates keyPathTemplates;
 
 		public NBXplorerNetwork Network
 		{
@@ -491,21 +317,36 @@ namespace NBXplorer
 			}
 		}
 
-		EngineAccessor _Engine;
-		internal Repository(EngineAccessor engineAccessor, NBXplorerNetwork network)
+		DBriizeTransactionContext _TxContext;
+		internal Repository(DBriizeEngine engine, NBXplorerNetwork network, KeyPathTemplates keyPathTemplates)
 		{
 			if (network == null)
 				throw new ArgumentNullException(nameof(network));
 			_Network = network;
+			this.keyPathTemplates = keyPathTemplates;
 			Serializer = new Serializer(_Network.NBitcoinNetwork);
 			_Network = network;
-			_Engine = engineAccessor;
+			_TxContext = new DBriizeTransactionContext(engine);
+			_TxContext.UnhandledException += (s, ex) =>
+			{
+				Logs.Explorer.LogCritical(ex, $"{network.CryptoCode}: Unhandled exception in the repository");
+			};
 			_Suffix = network.CryptoCode == "BTC" ? "" : network.CryptoCode;
 		}
+
+		public Task StartAsync()
+		{
+			return _TxContext.StartAsync();
+		}
+		public Task DisposeAsync()
+		{
+			return _TxContext.DisposeAsync();
+		}
+
 		public string _Suffix;
 		public Task<BlockLocator> GetIndexProgress()
 		{
-			return _Engine.DoAsync<BlockLocator>(tx =>
+			return _TxContext.DoAsync<BlockLocator>(tx =>
 			{
 				tx.ValuesLazyLoadingIsOn = false;
 				var existingRow = tx.Select<string, byte[]>($"{_Suffix}IndexProgress", "");
@@ -519,7 +360,7 @@ namespace NBXplorer
 
 		public Task SetIndexProgress(BlockLocator locator)
 		{
-			return _Engine.DoAsync(tx =>
+			return _TxContext.DoAsync(tx =>
 			{
 				if (locator == null)
 					tx.RemoveKey($"{_Suffix}IndexProgress", "");
@@ -531,7 +372,7 @@ namespace NBXplorer
 
 		public Task<KeyPathInformation> GetUnused(DerivationStrategyBase strategy, DerivationFeature derivationFeature, int n, bool reserve)
 		{
-			return _Engine.DoAsync<KeyPathInformation>((tx) =>
+			return _TxContext.DoAsync<KeyPathInformation>((tx) =>
 			{
 				tx.ValuesLazyLoadingIsOn = false;
 				var availableTable = GetAvailableKeysIndex(tx, strategy, derivationFeature);
@@ -550,7 +391,7 @@ namespace NBXplorer
 			});
 		}
 
-		int GetAddressToGenerateCount(DBreeze.Transactions.Transaction tx, DerivationStrategyBase strategy, DerivationFeature derivationFeature)
+		int GetAddressToGenerateCount(DBriize.Transactions.Transaction tx, DerivationStrategyBase strategy, DerivationFeature derivationFeature)
 		{
 			var availableTable = GetAvailableKeysIndex(tx, strategy, derivationFeature);
 			var currentlyAvailable = availableTable.Count();
@@ -559,15 +400,17 @@ namespace NBXplorer
 			return Math.Max(0, MaxPoolSize - currentlyAvailable);
 		}
 
-		private void RefillAvailable(DBreeze.Transactions.Transaction tx, DerivationStrategyBase strategy, DerivationFeature derivationFeature, int toGenerate)
+		private void RefillAvailable(DBriize.Transactions.Transaction tx, DerivationStrategyBase strategy, DerivationFeature derivationFeature, int toGenerate)
 		{
 			if (toGenerate <= 0)
 				return;
 			var availableTable = GetAvailableKeysIndex(tx, strategy, derivationFeature);
 			var highestTable = GetHighestPathIndex(tx, strategy, derivationFeature);
 			int highestGenerated = highestTable.SelectInt(0) ?? -1;
-			var feature = strategy.GetLineFor(derivationFeature);
-			for (int i = 0; i < toGenerate; i++)
+			var feature = strategy.GetLineFor(keyPathTemplates.GetKeyPathTemplate(derivationFeature));
+
+			KeyPathInformation[] keyPathInformations = new KeyPathInformation[toGenerate];
+			Parallel.For(0, toGenerate, i =>
 			{
 				var index = highestGenerated + i + 1;
 				var derivation = feature.Derive((uint)index);
@@ -578,8 +421,14 @@ namespace NBXplorer
 					TrackedSource = new DerivationSchemeTrackedSource(strategy),
 					DerivationStrategy = strategy,
 					Feature = derivationFeature,
-					KeyPath = DerivationStrategyBase.GetKeyPath(derivationFeature).Derive(index, false)
+					KeyPath = keyPathTemplates.GetKeyPathTemplate(derivationFeature).GetKeyPath(index, false)
 				};
+				keyPathInformations[i] = info;
+			});
+			for (int i = 0; i < toGenerate; i++)
+			{
+				var index = highestGenerated + i + 1;
+				var info = keyPathInformations[i];
 				var bytes = ToBytes(info);
 				GetScriptsIndex(tx, info.ScriptPubKey).Insert($"{strategy.GetHash()}-{derivationFeature}", bytes);
 				availableTable.Insert(index, bytes);
@@ -593,7 +442,7 @@ namespace NBXplorer
 			// Fetch the lastEventId on row 0
 			// Increment it,
 			// Insert event
-			return _Engine.DoAsync((tx) =>
+			return _TxContext.DoAsync((tx) =>
 			{
 				var idx = GetEventsIndex(tx);
 				var lastEventIndexMaybe = idx.SelectLong(0);
@@ -610,7 +459,7 @@ namespace NBXplorer
 		{
 			if (lastEventId < 1 && limit.HasValue && limit.Value != int.MaxValue)
 				limit = limit.Value + 1; // The row with key 0 holds the lastEventId
-			return _Engine.DoAsync((tx) =>
+			return _TxContext.DoAsync((tx) =>
 			{
 				if (lastKnownEventIndex != -1 && lastKnownEventIndex == lastEventId)
 					return new List<NewEventBase>();
@@ -632,12 +481,12 @@ namespace NBXplorer
 
 		public Task SaveKeyInformations(KeyPathInformation[] keyPathInformations)
 		{
-			return _Engine.DoAsync((tx) =>
+			return _TxContext.DoAsync((tx) =>
 			{
 				foreach (var info in keyPathInformations)
 				{
 					var bytes = ToBytes(info);
-					GetScriptsIndex(tx, info.ScriptPubKey).Insert($"{info.DerivationStrategy.GetHash()}-{info.DerivationStrategy}", bytes);
+					GetScriptsIndex(tx, info.ScriptPubKey).Insert($"{info.DerivationStrategy.GetHash()}-{info.Feature}", bytes);
 				}
 				tx.Commit();
 			});
@@ -645,7 +494,7 @@ namespace NBXplorer
 
 		public Task Track(IDestination address)
 		{
-			return _Engine.DoAsync((tx) =>
+			return _TxContext.DoAsync((tx) =>
 			{
 				var info = new KeyPathInformation()
 				{
@@ -658,12 +507,20 @@ namespace NBXplorer
 			});
 		}
 
-		public Task<int> RefillAddressPoolIfNeeded(DerivationStrategyBase strategy, DerivationFeature derivationFeature, int maxAddreses = int.MaxValue)
+		public Task<int> GenerateAddresses(DerivationStrategyBase strategy, DerivationFeature derivationFeature, int maxAddresses)
 		{
-			return _Engine.DoAsync((tx) =>
+			return GenerateAddresses(strategy, derivationFeature, new GenerateAddressQuery(null, maxAddresses));
+		}
+		public Task<int> GenerateAddresses(DerivationStrategyBase strategy, DerivationFeature derivationFeature, GenerateAddressQuery query = null)
+		{
+			query = query ?? new GenerateAddressQuery();
+			return _TxContext.DoAsync((tx) =>
 			{
 				var toGenerate = GetAddressToGenerateCount(tx, strategy, derivationFeature);
-				toGenerate = Math.Min(maxAddreses, toGenerate);
+				if (query.MaxAddresses is int max)
+					toGenerate = Math.Min(max, toGenerate);
+				if (query.MinAddresses is int min)
+					toGenerate = Math.Max(min, toGenerate);
 				RefillAvailable(tx, strategy, derivationFeature, toGenerate);
 				return toGenerate;
 			});
@@ -737,7 +594,7 @@ namespace NBXplorer
 				return result;
 			foreach (var batch in transactions.Batch(BatchSize))
 			{
-				await _Engine.DoAsync(tx =>
+				await _TxContext.DoAsync(tx =>
 				{
 					var date = NBitcoin.Utils.DateTimeToUnixTime(now);
 					foreach (var btx in batch)
@@ -774,7 +631,7 @@ namespace NBXplorer
 		public async Task<SavedTransaction[]> GetSavedTransactions(uint256 txid)
 		{
 			List<SavedTransaction> saved = new List<SavedTransaction>();
-			await _Engine.DoAsync(tx =>
+			await _TxContext.DoAsync(tx =>
 			{
 				foreach (var row in tx.SelectForward<string, byte[]>($"{_Suffix}tx-" + txid.ToString()))
 				{
@@ -803,7 +660,7 @@ namespace NBXplorer
 				return result;
 			foreach (var batch in scripts.Batch(BatchSize))
 			{
-				await _Engine.DoAsync(tx =>
+				await _TxContext.DoAsync(tx =>
 				{
 					tx.ValuesLazyLoadingIsOn = false;
 					foreach (var script in batch)
@@ -883,7 +740,7 @@ namespace NBXplorer
 			bool needUpdate = false;
 			Dictionary<uint256, long> firstSeenList = new Dictionary<uint256, long>();
 
-			var transactions = await _Engine.DoAsync(tx =>
+			var transactions = await _TxContext.DoAsync(tx =>
 			{
 				var table = GetTransactionsIndex(tx, trackedSource);
 				tx.ValuesLazyLoadingIsOn = false;
@@ -930,6 +787,13 @@ namespace NBXplorer
 					{
 						needUpdate = true;
 						tx.NeedRemove = true;
+
+						foreach (var kv in tx.KnownKeyPathMapping)
+						{
+							// The pruned transaction has more info about owned utxo than the unpruned, we need to update the unpruned
+							if (previousConfirmed.KnownKeyPathMapping.TryAdd(kv.Key, kv.Value))
+								previousConfirmed.NeedUpdate = true;
+						}
 					}
 					else
 					{
@@ -949,14 +813,14 @@ namespace NBXplorer
 				// This is legacy data, need an update
 				foreach (var data in transactions.Where(t => t.NeedUpdate && t.KnownKeyPathMapping == null))
 				{
-					data.KnownKeyPathMapping = (await this.GetMatches(data.Transaction, data.Key.BlockHash, DateTimeOffset.UtcNow))
+					data.KnownKeyPathMapping = (await this.GetMatches(data.Transaction, data.Key.BlockHash, DateTimeOffset.UtcNow, false))
 											  .Where(m => m.TrackedSource.Equals(trackedSource))
 											  .Select(m => m.KnownKeyPathMapping)
 											  .First();
 				}
 #pragma warning disable CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
 				// This can be eventually consistent, let's not waste one round trip waiting for this
-				_Engine.DoAsync(tx =>
+				_TxContext.DoAsync(tx =>
 				{
 					var table = GetTransactionsIndex(tx, trackedSource);
 					foreach (var data in transactions.Where(t => t.NeedUpdate))
@@ -1289,13 +1153,38 @@ namespace NBXplorer
 			}
 		}
 
+		public async Task SaveMetadata<TMetadata>(TrackedSource source, string key, TMetadata value) where TMetadata : class
+		{
+			await _TxContext.DoAsync(tx =>
+			{
+				var table = GetMetadataIndex(tx, source);
+				if (value != null)
+					table.Insert(key, Zip(Serializer.ToString(value)));
+				else
+					table.RemoveKey(key);
+				tx.Commit();
+			});
+		}
+		public async Task<TMetadata> GetMetadata<TMetadata>(TrackedSource source, string key) where TMetadata: class
+		{
+			return await _TxContext.DoAsync(tx =>
+			{
+				var table = GetMetadataIndex(tx, source);
+				foreach (var row in table.SelectForwardSkip(0, key))
+				{
+					return Serializer.ToObject<TMetadata>(Unzip(row.Value));
+				}
+				return null;
+			});
+		}
+
 		public async Task SaveMatches(TrackedTransaction[] transactions)
 		{
 			if (transactions.Length == 0)
 				return;
 			var groups = transactions.GroupBy(i => i.TrackedSource);
 
-			await _Engine.DoAsync(tx =>
+			await _TxContext.DoAsync(tx =>
 			{
 				foreach (var group in groups)
 				{
@@ -1307,7 +1196,7 @@ namespace NBXplorer
 						{
 							foreach (var kv in value.KnownKeyPathMapping)
 							{
-								var info = new KeyPathInformation(kv.Value, s.DerivationStrategy);
+								var info = new KeyPathInformation(keyPathTemplates, kv.Value, s.DerivationStrategy);
 								var availableIndex = GetAvailableKeysIndex(tx, s.DerivationStrategy, info.Feature);
 								var reservedIndex = GetReservedKeysIndex(tx, s.DerivationStrategy, info.Feature);
 								var index = info.GetIndex();
@@ -1339,7 +1228,7 @@ namespace NBXplorer
 		{
 			if (prunable == null || prunable.Count == 0)
 				return Task.CompletedTask;
-			return _Engine.DoAsync(tx =>
+			return _TxContext.DoAsync(tx =>
 			{
 				var table = GetTransactionsIndex(tx, trackedSource);
 				foreach (var tracked in prunable)
@@ -1364,7 +1253,7 @@ namespace NBXplorer
 		{
 			if (cleanList == null || cleanList.Count == 0)
 				return;
-			await _Engine.DoAsync(tx =>
+			await _TxContext.DoAsync(tx =>
 			{
 				var table = GetTransactionsIndex(tx, trackedSource);
 				foreach (var tracked in cleanList)
@@ -1377,7 +1266,7 @@ namespace NBXplorer
 
 		internal Task UpdateAddressPool(DerivationSchemeTrackedSource trackedSource, Dictionary<DerivationFeature, int?> highestKeyIndexFound)
 		{
-			return _Engine.DoAsync(tx =>
+			return _TxContext.DoAsync(tx =>
 			{
 				tx.ValuesLazyLoadingIsOn = false;
 				foreach (var kv in highestKeyIndexFound)
@@ -1385,9 +1274,9 @@ namespace NBXplorer
 					if (kv.Value == null)
 						continue;
 					var index = GetAvailableKeysIndex(tx, trackedSource.DerivationStrategy, kv.Key);
-					bool needRefill = CleanUsed(kv, index);
+					bool needRefill = CleanUsed(kv.Value.Value, index);
 					index = GetReservedKeysIndex(tx, trackedSource.DerivationStrategy, kv.Key);
-					needRefill |= CleanUsed(kv, index);
+					needRefill |= CleanUsed(kv.Value.Value, index);
 					if (needRefill)
 					{
 						var hIndex = GetHighestPathIndex(tx, trackedSource.DerivationStrategy, kv.Key);
@@ -1402,13 +1291,13 @@ namespace NBXplorer
 			});
 		}
 
-		private bool CleanUsed(KeyValuePair<DerivationFeature, int?> kv, Index index)
+		private bool CleanUsed(int highestIndex, Index index)
 		{
 			bool needRefill = false;
 			foreach (var row in index.SelectForwardSkip(0))
 			{
 				var keyInfo = ToObject<KeyPathInformation>(row.Value);
-				if (keyInfo.GetIndex() <= kv.Value.Value)
+				if (keyInfo.GetIndex() <= highestIndex)
 				{
 					index.RemoveKey(keyInfo.GetIndex());
 					needRefill = true;
@@ -1418,67 +1307,84 @@ namespace NBXplorer
 		}
 
 		FixedSizeCache<uint256, uint256> noMatchCache = new FixedSizeCache<uint256, uint256>(5000, k => k);
-		public async Task<TrackedTransaction[]> GetMatches(Transaction tx, uint256 blockId, DateTimeOffset now)
+		public Task<TrackedTransaction[]> GetMatches(Transaction tx, uint256 blockId, DateTimeOffset now, bool useCache)
 		{
-			var h = tx.GetHash();
-			if (blockId != null && noMatchCache.Contains(h))
-			{
-				return Array.Empty<TrackedTransaction>();
-			}
+			return GetMatches(new[] { tx }, blockId, now, useCache);
+		}
+		public async Task<TrackedTransaction[]> GetMatches(IList<Transaction> txs, uint256 blockId, DateTimeOffset now, bool useCache)
+		{
+			foreach (var tx in txs)
+				tx.PrecomputeHash(false, true);
+			var transactionsPerScript = new MultiValueDictionary<Script, Transaction>();
 			var matches = new Dictionary<string, TrackedTransaction>();
-			HashSet<Script> inputScripts = new HashSet<Script>();
-			HashSet<Script> outputScripts = new HashSet<Script>();
-			HashSet<Script> scripts = new HashSet<Script>();
-			foreach (var input in tx.Inputs)
+			HashSet<Script> scripts = new HashSet<Script>(txs.Count);
+			var noMatchTransactions = new HashSet<uint256>(txs.Count);
+			foreach (var tx in txs)
 			{
-				var signer = input.GetSigner();
-				if (signer != null)
+				if (blockId != null && useCache && noMatchCache.Contains(tx.GetHash()))
 				{
-					inputScripts.Add(signer.ScriptPubKey);
-					scripts.Add(signer.ScriptPubKey);
+					continue;
+				}
+				noMatchTransactions.Add(tx.GetHash());
+				foreach (var input in tx.Inputs)
+				{
+					var signer = input.GetSigner();
+					if (signer != null)
+					{
+						scripts.Add(signer.ScriptPubKey);
+						transactionsPerScript.Add(signer.ScriptPubKey, tx);
+					}
+				}
+				foreach (var output in tx.Outputs)
+				{
+					scripts.Add(output.ScriptPubKey);
+					transactionsPerScript.Add(output.ScriptPubKey, tx);
 				}
 			}
-
-			foreach (var output in tx.Outputs)
-			{
-				outputScripts.Add(output.ScriptPubKey);
-				scripts.Add(output.ScriptPubKey);
-			}
-
+			if (scripts.Count == 0)
+				return Array.Empty<TrackedTransaction>();
 			var keyInformations = await GetKeyInformations(scripts.ToArray());
 			foreach (var keyInfoByScripts in keyInformations)
 			{
-				foreach (var keyInfo in keyInfoByScripts.Value)
+				foreach (var tx in transactionsPerScript[keyInfoByScripts.Key])
 				{
-					var matchesGroupingKey = keyInfo.DerivationStrategy?.ToString() ?? keyInfo.ScriptPubKey.ToHex();
-					if (!matches.TryGetValue(matchesGroupingKey, out TrackedTransaction match))
+					if (keyInfoByScripts.Value.Count != 0)
+						noMatchTransactions.Remove(tx.GetHash());
+					foreach (var keyInfo in keyInfoByScripts.Value)
 					{
-						match = new TrackedTransaction(
-							new TrackedTransactionKey(h, blockId, false),
-							keyInfo.TrackedSource,
-							tx,
-							new Dictionary<Script, KeyPath>())
+						var matchesGroupingKey = $"{keyInfo.DerivationStrategy?.ToString() ?? keyInfo.ScriptPubKey.ToHex()}-[{tx.GetHash()}]";
+						if (!matches.TryGetValue(matchesGroupingKey, out TrackedTransaction match))
 						{
-							FirstSeen = now,
-							Inserted = now
-						};
-						matches.Add(matchesGroupingKey, match);
+							match = new TrackedTransaction(
+								new TrackedTransactionKey(tx.GetHash(), blockId, false),
+								keyInfo.TrackedSource,
+								tx,
+								new Dictionary<Script, KeyPath>())
+							{
+								FirstSeen = now,
+								Inserted = now
+							};
+							matches.Add(matchesGroupingKey, match);
+						}
+						if (keyInfo.KeyPath != null)
+							match.KnownKeyPathMapping.TryAdd(keyInfo.ScriptPubKey, keyInfo.KeyPath);
 					}
-					if (keyInfo.KeyPath != null)
-						match.KnownKeyPathMapping.TryAdd(keyInfo.ScriptPubKey, keyInfo.KeyPath);
 				}
 			}
 			foreach (var m in matches.Values)
 			{
 				m.KnownKeyPathMappingUpdated();
 			}
-			if (blockId == null && 
-				matches.Count == 0)
+
+			foreach (var tx in txs)
 			{
-				noMatchCache.Add(h);
-				return Array.Empty<TrackedTransaction>();
+				if (blockId == null &&
+					noMatchTransactions.Contains(tx.GetHash()))
+				{
+					noMatchCache.Add(tx.GetHash());
+				}
 			}
-			return matches.Values.ToArray();
+			return matches.Values.Count == 0 ? Array.Empty<TrackedTransaction>() : matches.Values.ToArray();
 		}
 	}
 }

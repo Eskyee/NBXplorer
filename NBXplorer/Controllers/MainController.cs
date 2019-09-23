@@ -30,7 +30,7 @@ namespace NBXplorer.Controllers
 {
 	[Route("v1")]
 	[Authorize]
-	public class MainController : Controller
+	public partial class MainController : Controller
 	{
 		JsonSerializerSettings _SerializerSettings;
 		public MainController(
@@ -38,26 +38,33 @@ namespace NBXplorer.Controllers
 			RepositoryProvider repositoryProvider,
 			ChainProvider chainProvider,
 			EventAggregator eventAggregator,
-			BitcoinDWaitersAccessor waiters,
+			BitcoinDWaiters waiters,
 			AddressPoolServiceAccessor addressPoolService,
 			ScanUTXOSetServiceAccessor scanUTXOSetService,
-			IOptions<MvcJsonOptions> jsonOptions)
+			RebroadcasterHostedService rebroadcaster,
+			KeyPathTemplates keyPathTemplates,
+			MvcNewtonsoftJsonOptions jsonOptions
+			)
 		{
 			ExplorerConfiguration = explorerConfiguration;
 			RepositoryProvider = repositoryProvider;
 			ChainProvider = chainProvider;
-			_SerializerSettings = jsonOptions.Value.SerializerSettings;
+			_SerializerSettings = jsonOptions.SerializerSettings;
 			_EventAggregator = eventAggregator;
 			ScanUTXOSetService = scanUTXOSetService.Instance;
-			Waiters = waiters.Instance;
+			Waiters = waiters;
+			Rebroadcaster = rebroadcaster;
+			this.keyPathTemplates = keyPathTemplates;
 			AddressPoolService = addressPoolService.Instance;
 		}
 		EventAggregator _EventAggregator;
+		private readonly KeyPathTemplates keyPathTemplates;
 
 		public BitcoinDWaiters Waiters
 		{
 			get; set;
 		}
+		public RebroadcasterHostedService Rebroadcaster { get; }
 		public AddressPoolService AddressPoolService
 		{
 			get;
@@ -104,20 +111,20 @@ namespace NBXplorer.Controllers
 				throw new ArgumentNullException(nameof(strategy));
 			var network = GetNetwork(cryptoCode, false);
 			var repository = RepositoryProvider.GetRepository(network);
+			if (skip >= repository.MinPoolSize)
+				throw new NBXplorerError(404, "strategy-not-found", $"This strategy is not tracked, or you tried to skip too much unused addresses").AsException();
 			try
 			{
 				var result = await repository.GetUnused(strategy, feature, skip, reserve);
 				if (reserve)
 				{
-					while (result == null && skip < repository.MinPoolSize)
+					while (result == null)
 					{
-						await repository.RefillAddressPoolIfNeeded(strategy, feature);
+						await AddressPoolService.GenerateAddresses(network, strategy, feature, new GenerateAddressQuery(1, null));
 						result = await repository.GetUnused(strategy, feature, skip, reserve);
 					}
-					AddressPoolService.RefillAddressPoolIfNeeded(network, strategy, feature);
+					_ = AddressPoolService.GenerateAddresses(network, strategy, feature);
 				}
-				if (result == null)
-					throw new NBXplorerError(404, "strategy-not-found", $"This strategy is not tracked, or you tried to skip too much unused addresses").AsException();
 				return result;
 			}
 			catch (NotSupportedException)
@@ -177,34 +184,34 @@ namespace NBXplorer.Controllers
 			var waiter = Waiters.GetWaiter(network);
 			var chain = ChainProvider.GetChain(network);
 			var repo = RepositoryProvider.GetRepository(network);
-			var now = DateTimeOffset.UtcNow;
-
-
+			
 			var location = waiter.GetLocation();
+			GetBlockchainInfoResponse blockchainInfo = null;
+			if (waiter.RPCAvailable)
+			{
+				try
+				{
+					var rpc = waiter.RPC.Clone();
+					rpc.RequestTimeout = TimeSpan.FromMinutes(1.0);
+					blockchainInfo = await rpc.GetBlockchainInfoAsyncEx();
+				}
+				catch(OperationCanceledException) // Timeout, can happen if core is really busy
+				{
 
-			var blockchainInfoAsync = waiter.RPCAvailable ? waiter.RPC.GetBlockchainInfoAsyncEx() : null;
-			var networkInfoAsync = waiter.RPCAvailable ? waiter.RPC.GetNetworkInfoAsync() : null;
-			await repo.Ping();
-			var pingAfter = DateTimeOffset.UtcNow;
+				}
+			}
 
-			GetBlockchainInfoResponse blockchainInfo = blockchainInfoAsync == null ? null : await blockchainInfoAsync;
-			GetNetworkInfoResponse networkInfo = networkInfoAsync == null ? null : await networkInfoAsync;
 			var status = new StatusResult()
 			{
 				NetworkType = network.NBitcoinNetwork.NetworkType,
 				CryptoCode = network.CryptoCode,
 				Version = typeof(MainController).GetTypeInfo().Assembly.GetCustomAttribute<AssemblyFileVersionAttribute>().Version,
 				SupportedCryptoCodes = Waiters.All().Select(w => w.Network.CryptoCode).ToArray(),
-				RepositoryPingTime = (pingAfter - now).TotalSeconds,
 				IsFullySynched = true
 			};
 
-			if (status.RepositoryPingTime > 30)
-			{
-				Logs.Explorer.LogWarning($"Repository ping exceeded 30 seconds ({(int)status.RepositoryPingTime}), please report the issue to NBXplorer developers");
-			}
-
-			if (blockchainInfo != null)
+			GetNetworkInfoResponse networkInfo = waiter.NetworkInfo;
+			if (blockchainInfo != null && networkInfo != null)
 			{
 				status.BitcoinStatus = new BitcoinStatus()
 				{
@@ -212,13 +219,15 @@ namespace NBXplorer.Controllers
 					Blocks = (int)blockchainInfo.Blocks,
 					Headers = (int)blockchainInfo.Headers,
 					VerificationProgress = blockchainInfo.VerificationProgress,
-					MinRelayTxFee = new FeeRate(Money.Coins((decimal)networkInfo.relayfee), 1000),
-					IncrementalRelayFee = new FeeRate(Money.Coins((decimal)networkInfo.incrementalfee), 1000),
+					MinRelayTxFee = networkInfo.GetRelayFee(),
+					IncrementalRelayFee = networkInfo.GetIncrementalFee(),
 					Capabilities = new NodeCapabilities()
 					{
 						CanScanTxoutSet = waiter.RPC.Capabilities.SupportScanUTXOSet,
 						CanSupportSegwit = waiter.RPC.Capabilities.SupportSegwit
-					}
+					},
+					ExternalAddresses = (networkInfo.localaddresses ?? Array.Empty<GetNetworkInfoResponse.LocalAddress>())
+										.Select(l => $"{l.address}:{l.port}").ToArray()
 				};
 				status.IsFullySynched &= status.BitcoinStatus.IsSynched;
 			}
@@ -228,6 +237,17 @@ namespace NBXplorer.Controllers
 									&& waiter.State == BitcoinDWaiterState.Ready
 									&& status.SyncHeight.HasValue
 									&& blockchainInfo.Headers - status.SyncHeight.Value < 3;
+			if(status.IsFullySynched)
+			{
+				var now = DateTimeOffset.UtcNow;
+				await repo.Ping();
+				var pingAfter = DateTimeOffset.UtcNow;
+				status.RepositoryPingTime = (pingAfter - now).TotalSeconds;
+				if (status.RepositoryPingTime > 30)
+				{
+					Logs.Explorer.LogWarning($"Repository ping exceeded 30 seconds ({(int)status.RepositoryPingTime}), please report the issue to NBXplorer developers");
+				}
+			}
 			return Json(status);
 		}
 
@@ -427,21 +447,32 @@ namespace NBXplorer.Controllers
 			[ModelBinder(BinderType = typeof(DerivationStrategyModelBinder))]
 			DerivationStrategyBase derivationScheme,
 			[ModelBinder(BinderType = typeof(BitcoinAddressModelBinder))]
-			BitcoinAddress address)
+			BitcoinAddress address, [FromBody] TrackWalletRequest request = null)
 		{
+			request = request ?? new TrackWalletRequest();
 			TrackedSource trackedSource = GetTrackedSource(derivationScheme, address);
 			if (trackedSource == null)
 				return NotFound();
 			var network = GetNetwork(cryptoCode, false);
 			if (trackedSource is DerivationSchemeTrackedSource dts)
 			{
-				foreach (var feature in Enum.GetValues(typeof(DerivationFeature)).Cast<DerivationFeature>())
+				if (request.Wait)
 				{
-					await RepositoryProvider.GetRepository(network).RefillAddressPoolIfNeeded(dts.DerivationStrategy, feature, 3);
+					foreach (var feature in keyPathTemplates.GetSupportedDerivationFeatures())
+					{
+						await RepositoryProvider.GetRepository(network).GenerateAddresses(dts.DerivationStrategy, feature, GenerateAddressQuery(request, feature));
+					}
 				}
-				foreach (var feature in Enum.GetValues(typeof(DerivationFeature)).Cast<DerivationFeature>())
+				else
 				{
-					AddressPoolService.RefillAddressPoolIfNeeded(network, dts.DerivationStrategy, feature);
+					foreach (var feature in keyPathTemplates.GetSupportedDerivationFeatures())
+					{
+						await RepositoryProvider.GetRepository(network).GenerateAddresses(dts.DerivationStrategy, feature, new GenerateAddressQuery(minAddresses: 3, null));
+					}
+					foreach (var feature in keyPathTemplates.GetSupportedDerivationFeatures())
+					{
+						_ = AddressPoolService.GenerateAddresses(network, dts.DerivationStrategy, feature, GenerateAddressQuery(request, feature));
+					}
 				}
 			}
 			else if (trackedSource is IDestination ats)
@@ -449,6 +480,20 @@ namespace NBXplorer.Controllers
 				await RepositoryProvider.GetRepository(network).Track(ats);
 			}
 			return Ok();
+		}
+
+		private GenerateAddressQuery GenerateAddressQuery(TrackWalletRequest request, DerivationFeature feature)
+		{
+			if (request?.DerivationOptions == null)
+				return null;
+			foreach (var derivationOption in request.DerivationOptions)
+			{
+				if ((derivationOption.Feature is DerivationFeature f && f == feature) || derivationOption.Feature is null)
+				{
+					return new GenerateAddressQuery(derivationOption.MinAddresses, derivationOption.MaxAddresses);
+				}
+			}
+			return null;
 		}
 
 		private static TrackedSource GetTrackedSource(DerivationStrategyBase derivationScheme, BitcoinAddress address)
@@ -515,7 +560,7 @@ namespace NBXplorer.Controllers
 						TransactionId = tx.Record.TransactionHash,
 						Transaction = includeTransaction ? tx.Record.Transaction : null,
 						Confirmations = tx.Height.HasValue ? currentHeight - tx.Height.Value + 1 : 0,
-						Timestamp = txs.GetByTxId(tx.Record.TransactionHash).Select(t => t.Record.FirstSeen).First(),
+						Timestamp = tx.Record.FirstSeen,
 						Inputs = tx.Record.SpentOutpoints.Select(o => txs.GetUTXO(o)).Where(o => o != null).ToList(),
 						Outputs = tx.Record.GetReceivedOutputs().ToList()
 					};
@@ -527,6 +572,7 @@ namespace NBXplorer.Controllers
 
 					txInfo.BalanceChange = txInfo.Outputs.Select(o => o.Value).Sum() - txInfo.Inputs.Select(o => o.Value).Sum();
 				}
+				item.TxSet.Transactions.Reverse(); // So the youngest transaction is generally first
 			}
 
 
@@ -579,9 +625,9 @@ namespace NBXplorer.Controllers
 				await repo.SaveTransactions(txs.First().BlockTime, txs.Select(t => t.Transaction).ToArray(), txs.Key);
 				foreach (var tx in txs)
 				{
-					var matches = await repo.GetMatches(tx.Transaction, txs.Key, tx.BlockTime);
+					var matches = await repo.GetMatches(tx.Transaction, txs.Key, tx.BlockTime, false);
 					await repo.SaveMatches(matches);
-					AddressPoolService.RefillAddressPoolIfNeeded(network, matches);
+					_ = AddressPoolService.GenerateAddresses(network, matches);
 				}
 			}
 			return Ok();
@@ -627,6 +673,33 @@ namespace NBXplorer.Controllers
 			}
 		}
 
+		[HttpPost]
+		[Route("cryptos/{cryptoCode}/derivations/{derivationScheme}/metadata/{key}")]
+		public async Task<IActionResult> SetMetadata(string cryptoCode,
+			[ModelBinder(BinderType = typeof(DerivationStrategyModelBinder))]
+			DerivationStrategyBase derivationScheme, string key, 
+			[FromBody]
+			JToken value = null)
+		{
+			var network = this.GetNetwork(cryptoCode, true);
+			var trackedSource = new DerivationSchemeTrackedSource(derivationScheme);
+			var repo = this.RepositoryProvider.GetRepository(network);
+			await repo.SaveMetadata(trackedSource, key, value);
+			return Ok();
+		}
+		[HttpGet]
+		[Route("cryptos/{cryptoCode}/derivations/{derivationScheme}/metadata/{key}")]
+		public async Task<IActionResult> GetMetadata(string cryptoCode,
+			[ModelBinder(BinderType = typeof(DerivationStrategyModelBinder))]
+			DerivationStrategyBase derivationScheme, string key)
+		{
+			var network = this.GetNetwork(cryptoCode, true);
+			var trackedSource = new DerivationSchemeTrackedSource(derivationScheme);
+			var repo = this.RepositoryProvider.GetRepository(network);
+			var result = await repo.GetMetadata<JToken>(trackedSource, key);
+			return result == null ? (IActionResult)NotFound() : Json(result);
+		}
+		Encoding UTF8 = new UTF8Encoding(false);
 		[HttpPost]
 		[Route("cryptos/{cryptoCode}/derivations/{derivationScheme}/utxos/scan")]
 		public IActionResult ScanUTXOSet(
@@ -691,11 +764,9 @@ namespace NBXplorer.Controllers
 			stopwatch.Start();
 			var transactions = await GetAnnotatedTransactions(repo, chain, trackedSource);
 
-			var states = UTXOStateResult.CreateStates(transactions.UnconfirmedTransactions.Select(c => c.Record),
-													transactions.ConfirmedTransactions.Select(c => c.Record));
-
-			changes.Confirmed = SetUTXOChange(states.Confirmed);
-			changes.Unconfirmed = SetUTXOChange(states.Unconfirmed, states.Confirmed.Actual);
+			changes.Confirmed = ToUTXOChange(transactions.ConfirmedState);
+			changes.Confirmed.SpentOutpoints.Clear();
+			changes.Unconfirmed = ToUTXOChange(transactions.UnconfirmedState - transactions.ConfirmedState);
 
 
 
@@ -706,7 +777,7 @@ namespace NBXplorer.Controllers
 			if (ExplorerConfiguration.AutoPruningTime != null &&
 			   stopwatch.Elapsed > ExplorerConfiguration.AutoPruningTime.Value)
 			{
-				await AttemptPrune(repo, transactions, states);
+				await AttemptPrune(repo, transactions, transactions.ConfirmedState);
 			}
 
 			changes.TrackedSource = trackedSource;
@@ -715,22 +786,28 @@ namespace NBXplorer.Controllers
 			return changes;
 		}
 
-		private async Task AttemptPrune(Repository repo, AnnotatedTransactionCollection transactions, UTXOStateResult states)
+		private UTXOChange ToUTXOChange(UTXOState state)
+		{
+			UTXOChange change = new UTXOChange();
+			change.SpentOutpoints.AddRange(state.SpentUTXOs);
+			change.UTXOs.AddRange(state.UTXOByOutpoint.Select(u => new UTXO(u.Value)));
+			return change;
+		}
+
+		private async Task<int> AttemptPrune(Repository repo, AnnotatedTransactionCollection transactions, UTXOState state)
 		{
 			var network = repo.Network;
 			var trackedSource = transactions.TrackedSource;
-			var quarter = states.Confirmed.Actual.GetQuarterTransactionTime();
+			var quarter = state.GetQuarterTransactionTime();
 			if (quarter != null)
 			{
 				Logs.Explorer.LogInformation($"{network.CryptoCode}: Pruning needed for {trackedSource.ToPrettyString()}...");
 
 				// Step 1. Mark all transactions whose UTXOs have been all spent for long enough (quarter of first seen time of all transaction)
-				var prunableIds = states.Confirmed.Actual
-								.UTXOByOutpoint
+				var prunableIds = state.UTXOByOutpoint
 								.Prunable
 								.Where(p => OldEnough(transactions, p.PrunedBy, quarter.Value))
-								.Select(p => transactions.GetByTxId(p.TransactionId).First())
-								.Select(p => p.Record.TransactionHash)
+								.Select(p => p.TransactionId)
 								.ToHashSet();
 
 				// Step2. Make sure that all their parent are also prunable (Ancestors first)
@@ -743,7 +820,7 @@ namespace NBXplorer.Controllers
 						if (!prunableIds.Contains(tx.Record.TransactionHash))
 							continue;
 						foreach (var parent in tx.Record.SpentOutpoints
-														.Select(spent => transactions.GetByTxId(spent.Hash)?.FirstOrDefault())
+														.Select(spent => transactions.GetByTxId(spent.Hash))
 														.Where(parent => parent != null)
 														.Where(parent => !prunableIds.Contains(parent.Record.TransactionHash)))
 						{
@@ -757,23 +834,22 @@ namespace NBXplorer.Controllers
 				else
 				{
 					await repo.Prune(trackedSource, prunableIds
-													.SelectMany(id => transactions.GetByTxId(id).Select(c => c.Record))
+													.Select(id => transactions.GetByTxId(id).Record)
 													.ToList());
 					Logs.Explorer.LogInformation($"{network.CryptoCode}: Pruned {prunableIds.Count} transactions");
+					return prunableIds.Count;
 				}
 			}
+			return 0;
 		}
 
 		private bool OldEnough(AnnotatedTransactionCollection transactions, uint256 prunedBy, DateTimeOffset pruneBefore)
 		{
 			// Let's make sure that the transaction that made this transaction pruned has enough confirmations
 			var tx = transactions.GetByTxId(prunedBy);
-			if (tx == null)
+			if (tx?.Height is null)
 				return false;
-			var firstSeen = tx.Where(t => t.Height != null)
-								  .Select(t => t.Record.FirstSeen)
-								  .FirstOrDefault();
-			return firstSeen <= pruneBefore;
+			return tx.Record.FirstSeen <= pruneBefore;
 		}
 
 		private static bool IsMatching(TrackedSource trackedSource, Script s, AnnotatedTransactionCollection transactions)
@@ -786,7 +862,7 @@ namespace NBXplorer.Controllers
 				throw new NotSupportedException();
 		}
 
-		static int[] MaxValue = new[] { int.MaxValue };
+		int MaxHeight = int.MaxValue;
 		private void FillUTXOsInformation(List<UTXO> utxos, AnnotatedTransactionCollection transactions, int currentHeight)
 		{
 			for (int i = 0; i < utxos.Count; i++)
@@ -794,47 +870,12 @@ namespace NBXplorer.Controllers
 				var utxo = utxos[i];
 				utxo.KeyPath = transactions.GetKeyPath(utxo.ScriptPubKey);
 				if (utxo.KeyPath != null)
-					utxo.Feature = DerivationStrategyBase.GetFeature(utxo.KeyPath);
-				var txHeight = transactions.GetByTxId(utxo.Outpoint.Hash)
-									.Select(t => t.Height)
-									.Where(h => h.HasValue)
-									.Select(t => t.Value)
-									.Concat(MaxValue)
-									.Min();
-				var firstSeen = transactions
-					.GetByTxId(utxo.Outpoint.Hash)
-					.Select(o => o.Record.FirstSeen)
-					.FirstOrDefault();
-				var isUnconf = txHeight == MaxValue[0];
+					utxo.Feature = keyPathTemplates.GetDerivationFeature(utxo.KeyPath);
+				var txHeight = transactions.GetByTxId(utxo.Outpoint.Hash).Height is int h ? h : MaxHeight;
+				var isUnconf = txHeight == MaxHeight;
 				utxo.Confirmations = isUnconf ? 0 : currentHeight - txHeight + 1;
-				utxo.Timestamp = firstSeen;
+				utxo.Timestamp = transactions.GetByTxId(utxo.Outpoint.Hash).Record.FirstSeen;
 			}
-		}
-
-		private UTXOChange SetUTXOChange(UTXOStates states, UTXOState substract = null)
-		{
-			substract = substract ?? new UTXOState();
-			var substractedSpent = new HashSet<OutPoint>(substract.SpentUTXOs);
-			var substractedReceived = new HashSet<OutPoint>(substract.UTXOByOutpoint.Select(u => u.Key));
-
-			UTXOChange change = new UTXOChange();
-			states.Known = states.Known ?? new UTXOState();
-
-			foreach (var coin in states.Actual.UTXOByOutpoint)
-			{
-				if (!states.Known.UTXOByOutpoint.ContainsKey(coin.Key) &&
-					!substractedReceived.Contains(coin.Key))
-					change.UTXOs.Add(new UTXO(coin.Value));
-			}
-
-			foreach (var outpoint in states.Actual.SpentUTXOs)
-			{
-				if (!states.Known.SpentUTXOs.Contains(outpoint) &&
-					(states.Known.UTXOByOutpoint.ContainsKey(outpoint) || substractedReceived.Contains(outpoint)) &&
-					!substractedSpent.Contains(outpoint))
-					change.SpentOutpoints.Add(outpoint);
-			}
-			return change;
 		}
 
 		private async Task<AnnotatedTransactionCollection> GetAnnotatedTransactions(Repository repo, SlimChain chain, TrackedSource trackedSource, uint256 txId = null)
@@ -850,23 +891,10 @@ namespace NBXplorer.Controllers
 				transactions = gettingParents.SelectMany(p => p.GetAwaiter().GetResult()).Concat(transactions).ToArray();
 			}
 
-			var annotatedTransactions = new AnnotatedTransactionCollection(
-				transactions.Select(t => new AnnotatedTransaction(t, chain))
-				.ToList(), trackedSource);
+			var annotatedTransactions = new AnnotatedTransactionCollection(transactions, trackedSource, chain, repo.Network.NBitcoinNetwork);
 
-
-			var cleaned = annotatedTransactions.DuplicatedTransactions.Where(c => (DateTimeOffset.UtcNow - c.Record.Inserted) > TimeSpan.FromDays(1.0)).Select(c => c.Record).ToArray();
-			if (cleaned.Length != 0)
-			{
-				foreach (var tx in cleaned)
-				{
-					_EventAggregator.Publish(new EvictedTransactionEvent(tx.TransactionHash));
-				}
-#pragma warning disable CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
-				// Can be eventually consistent
-				repo.CleanTransactions(annotatedTransactions.TrackedSource, cleaned.ToList());
-#pragma warning restore CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
-			}
+			Rebroadcaster.RebroadcastPeriodically(repo.Network, trackedSource, annotatedTransactions.UnconfirmedTransactions
+																				.Concat(annotatedTransactions.CleanupTransactions).Select(c => c.Record.Key).ToArray());
 			return annotatedTransactions;
 		}
 
@@ -884,7 +912,10 @@ namespace NBXplorer.Controllers
 			var network = GetNetwork(cryptoCode, true);
 			var trackedSource = GetTrackedSource(derivationScheme ?? extPubKey, address);
 			var tx = network.NBitcoinNetwork.Consensus.ConsensusFactory.CreateTransaction();
-			var stream = new BitcoinStream(Request.Body, false);
+			var buffer = new MemoryStream();
+			await Request.Body.CopyToAsync(buffer);
+			buffer.Position = 0;
+			var stream = new BitcoinStream(buffer, false);
 			tx.ReadWrite(stream);
 
 			var waiter = this.Waiters.GetWaiter(network);
@@ -934,6 +965,22 @@ namespace NBXplorer.Controllers
 					RPCMessage = rpcEx.Message
 				};
 			}
+		}
+
+		[HttpPost]
+		[Route("cryptos/{cryptoCode}/derivations/{derivationScheme}/prune")]
+		public async Task<PruneResponse> Prune(
+			string cryptoCode,
+			[ModelBinder(BinderType = typeof(DerivationStrategyModelBinder))]
+			DerivationStrategyBase derivationScheme)
+		{
+			var trackedSource = new DerivationSchemeTrackedSource(derivationScheme);
+			var network = GetNetwork(cryptoCode, false);
+			var chain = ChainProvider.GetChain(network);
+			var repo = RepositoryProvider.GetRepository(network);
+			var transactions = await GetAnnotatedTransactions(repo, chain, trackedSource);
+			int pruned = await AttemptPrune(repo, transactions, transactions.ConfirmedState);
+			return new PruneResponse() { TotalPruned = pruned };
 		}
 	}
 }

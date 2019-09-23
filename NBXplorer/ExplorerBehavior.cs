@@ -74,11 +74,9 @@ namespace NBXplorer
 		{
 			AttachedNode.StateChanged += AttachedNode_StateChanged;
 			AttachedNode.MessageReceived += AttachedNode_MessageReceived;
-			Run(Init);
-			_Timer = new Timer(Tick, null, 0, (int)TimeSpan.FromSeconds(30).TotalMilliseconds);
 		}
 
-		private async Task Init()
+		public async Task Init()
 		{
 			var currentLocation = await Repository.GetIndexProgress() ?? GetDefaultCurrentLocation();
 			var fork = Chain.FindFork(currentLocation);
@@ -89,36 +87,47 @@ namespace NBXplorer
 			}
 			CurrentLocation = currentLocation;
 			Logs.Explorer.LogInformation($"{Network.CryptoCode}: Starting scan at block " + fork.Height);
+			_Timer = new Timer(Tick, null, 0, (int)TimeSpan.FromSeconds(30).TotalMilliseconds);
 		}
 
 		private BlockLocator GetDefaultCurrentLocation()
 		{
 			if (StartHeight > Chain.Height)
 				throw new InvalidOperationException($"{Network.CryptoCode}: StartHeight should not be above the current tip");
-			return StartHeight == -1 ?
-				Chain.GetTipLocator() :
-				Chain.GetLocator(StartHeight);
+
+			BlockLocator blockLocator = null;
+			if (StartHeight == -1)
+			{
+				blockLocator = Chain.GetTipLocator();
+				Logs.Explorer.LogInformation($"{Network.CryptoCode}: Current Index Progress not found, start syncing from the header's chain tip (At height: {Chain.Height})");
+			}
+			else
+			{
+				blockLocator = Chain.GetLocator(StartHeight);
+				Logs.Explorer.LogInformation($"{Network.CryptoCode}: Current Index Progress not found, start syncing at height {Chain.Height}");
+			}
+			return blockLocator;
 		}
 
 
 
-		public void AskBlocks()
+		public int AskBlocks()
 		{
 			var node = AttachedNode;
 			if (node == null || node.State != NodeState.HandShaked)
-				return;
+				return 0;
 			if (Chain.Height < node.PeerVersion.StartHeight)
-				return;
-			var currentLocation = CurrentLocation;
+				return 0;
+			var currentLocation = (_HighestInFlight ?? CurrentLocation);
 			if (currentLocation == null)
-				return;
+				return 0;
 			var currentBlock = Chain.FindFork(currentLocation);
 			if (currentBlock.Height < StartHeight)
 				currentBlock = Chain.GetBlock(StartHeight) ?? Chain.TipBlock;
 
 			//Up to date
 			if (Chain.TipBlock.Hash == currentBlock.Hash)
-				return;
+				return 0;
 
 
 			int maxConcurrentBlocks = 10;
@@ -137,21 +146,28 @@ namespace NBXplorer
 			if (invs.Count != 0)
 			{
 				Repository.BatchSize = invs.Count == maxConcurrentBlocks ? int.MaxValue : 100;
-				_HighestInFlight = Chain.GetLocator(invs[invs.Count - 1].Hash);
+				_HighestInFlight = _HighestInFlight ?? Chain.GetLocator(invs[invs.Count - 1].Hash);
 				node.SendMessageAsync(new GetDataPayload(invs.ToArray()));
 				if (invs.Count > 1)
 					GC.Collect(); // Let's collect memory if we are synching 
 			}
+			return invs.Count;
 		}
 
 		ConcurrentDictionary<uint256, uint256> _InFlights = new ConcurrentDictionary<uint256, uint256>();
 		BlockLocator _HighestInFlight;
-
+		DateTimeOffset? _LastBlockDownloaded;
+		readonly static TimeSpan DownloadHangingTimeout = TimeSpan.FromMinutes(1.0);
 		void Tick(object state)
 		{
 			try
 			{
-				AskBlocks();
+				if (AskBlocks() == 0 &&
+					IsHanging())
+				{
+					Logs.Explorer.LogInformation($"{Network.CryptoCode}: Block download seems to hang, let's reconnect to this node");
+					AttachedNode?.DisconnectAsync("Block download is hanging");
+				}
 			}
 			catch (Exception ex)
 			{
@@ -160,6 +176,32 @@ namespace NBXplorer
 				Logs.Explorer.LogError($"{Network.CryptoCode}: Exception in ExplorerBehavior tick loop");
 				Logs.Explorer.LogError(ex.ToString());
 			}
+		}
+
+		public bool IsDownloading => !_InFlights.IsEmpty;
+
+		public bool IsHanging()
+		{
+			var node = AttachedNode;
+			if (node == null)
+				return false;
+			DateTimeOffset lastActivity;
+			if (IsDownloading) // If we download
+			{
+				if (_LastBlockDownloaded is DateTimeOffset lastBlockDownloaded)
+					lastActivity = lastBlockDownloaded;
+				else
+					lastActivity = node.ConnectedAt;
+			}
+			else if (IsSynching()) // Not downloading but synching
+			{
+				lastActivity = node.ConnectedAt;
+			}
+			else // If we do not download and we do not sync, we are ok
+			{
+				return false;
+			}
+			return (DateTimeOffset.UtcNow - lastActivity) >= DownloadHangingTimeout;
 		}
 
 		public NBXplorerNetwork Network
@@ -233,31 +275,45 @@ namespace NBXplorer
 		}
 		private async Task SaveMatches(Block block)
 		{
+			_LastBlockDownloaded = DateTimeOffset.UtcNow;
 			block.Header.PrecomputeHash(false, false);
 			foreach (var tx in block.Transactions)
 				tx.PrecomputeHash(false, true);
 
 			var blockHash = block.GetHash();
-			DateTimeOffset now = DateTimeOffset.UtcNow;
-			var matches =
-				block.Transactions
-				.Select(tx => Repository.GetMatches(tx, blockHash, now))
-				.ToArray();
-			await Task.WhenAll(matches);
-			await SaveMatches(matches.SelectMany((Task<TrackedTransaction[]> m) => m.GetAwaiter().GetResult()).ToArray(), blockHash, now);
-			var slimBlockHeader = Chain.GetBlock(blockHash);
-			if (slimBlockHeader != null)
+			var delay = TimeSpan.FromSeconds(1);
+		retry:
+			try
 			{
-				var blockEvent = new Models.NewBlockEvent()
+				DateTimeOffset now = DateTimeOffset.UtcNow;
+				var matches =
+					(await Repository.GetMatches(block.Transactions, blockHash, now, true))
+					.ToArray();
+				await SaveMatches(matches, blockHash, now);
+				var slimBlockHeader = Chain.GetBlock(blockHash);
+				if (slimBlockHeader != null)
 				{
-					CryptoCode = _Repository.Network.CryptoCode,
-					Hash = blockHash,
-					Height = slimBlockHeader.Height,
-					PreviousBlockHash = slimBlockHeader.Previous
-				};
-				var saving = Repository.SaveEvent(blockEvent);
-				_EventAggregator.Publish(blockEvent);
-				await saving;
+					var blockEvent = new Models.NewBlockEvent()
+					{
+						CryptoCode = _Repository.Network.CryptoCode,
+						Hash = blockHash,
+						Height = slimBlockHeader.Height,
+						PreviousBlockHash = slimBlockHeader.Previous
+					};
+					var saving = Repository.SaveEvent(blockEvent);
+					_EventAggregator.Publish(blockEvent);
+					await saving;
+				}
+			}
+			catch (Exception ex)
+			{
+				Logs.Explorer.LogWarning(ex, $"{Network.CryptoCode}: Error while saving block in database, retrying in {delay.TotalSeconds} seconds");
+				await Task.Delay(delay);
+				delay = delay * 2;
+				var maxDelay = TimeSpan.FromSeconds(60);
+				if (delay > maxDelay)
+					delay = maxDelay;
+				goto retry;
 			}
 
 			if (_InFlights.TryRemove(blockHash, out var unused) && _InFlights.IsEmpty)
@@ -277,14 +333,14 @@ namespace NBXplorer
 		private async Task SaveMatches(Transaction transaction)
 		{
 			var now = DateTimeOffset.UtcNow;
-			var matches = (await Repository.GetMatches(transaction, null, now)).ToArray();
+			var matches = (await Repository.GetMatches(transaction, null, now, false)).ToArray();
 			await SaveMatches(matches, null, now);
 		}
 
 		private async Task SaveMatches(TrackedTransaction[] matches, uint256 blockHash, DateTimeOffset now)
 		{
 			await Repository.SaveMatches(matches);
-			AddressPoolService.RefillAddressPoolIfNeeded(Network, matches);
+			_ = AddressPoolService.GenerateAddresses(Network, matches);
 			var saved = await Repository.SaveTransactions(now, matches.Select(m => m.Transaction).Distinct().ToArray(), blockHash);
 			var savedTransactions = saved.ToDictionary(s => s.Transaction.GetHash());
 

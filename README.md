@@ -9,7 +9,22 @@ The explorer supports P2SH,P2PKH,P2WPKH,P2WSH and Multi-sig derivation.
 
 This explorer is not meant to be exposed on internet, but should be used as an internal tool for tracking the UTXOs of your own service.
 
-It currently supports:
+It has a bunch of feature:
+
+* Can pass arguments via environment variable, command line or configuration file
+* Automatically reconnect to your node if the connection goes temporarily down
+* An easy to use REST API
+* Persistence (via in-file no-SQL datbase called DBreeze)
+* Connect via RPC to broadcast transaction instead of using the P2P protocol like this example
+* Connect via RPC to your trusted node to get the proper fee rate.
+* Altcoin support
+* Huge test suite
+* Pruning of transaction data (in practice, we don't need to save the whole transaction, only the spent outpoint and received coin for the wallet)
+* Multi-wallet
+* Flexible address generation schemes (multisig, segwit, legacy etc...)
+* Pruning for big wallets (Removal of tracked transaction which do not impact the resulting UTXO set)
+
+It currently the following altcoins:
 
 * BCash (also known as Bitcoin Cash)
 * BGold (also known as Bitcoin Gold)
@@ -27,6 +42,8 @@ It currently supports:
 * Polis
 * Ufo
 * Viacoin
+
+Read our [API Specification](docs/API.md), or our the [internal design of NBXplorer](docs/Design.md).
 
 ## Prerequisite
 
@@ -70,6 +87,12 @@ Example, if you have ltc node and btc node on regtest (default configuration), a
 ./run.sh --chains=btc,ltc --network=regtest
 ```
 
+## How to use the API?
+
+Check [the API documentation](docs/API.md), you can then use any client library:
+* [NBXplorer.NodeJS](https://github.com/junderw/NBXplorer.NodeJS) for NodeJS clients.
+* [NBXplorer.Client](https://www.nuget.org/packages/NBxplorer.Client) for .NET clients.
+
 ## With Docker
 
 Use [our image](https://hub.docker.com/r/nicolasdorier/nbxplorer/).
@@ -106,13 +129,25 @@ The default configuration assumes `mainnet` with only `btc` chain supported, and
 You can change the location of the configuration file with the `--conf=pathToConf` command line argument.
 
 ### Command line parameters
+Please note that NBXplorer uses cookie authentication by default. If you run your Bitcoin/Litecoin/Dash nodes using their daemon (like `bitcoind`, `litecoind` or `dashd`), they generate a new cookie every time you start them, and that should work without any extra configuration. 
+If you run the node(s) using the GUI versions, like Bitcoin\Litecoin\Dash Core Qt with the `-server` parameter while you set the rpcusername and rpcpassword in their `.conf` files, you must set those values for every crypto you are planning to support. 
+See samples below.
 
-#### From Source (.NET Core SDK required)
-The same settings as above, e.g.
-```dotnet run NBXplorer.dll --port=20300 --network=mainnet --nodeendpoint=127.0.0.1:32939```
+#### Run from source (requires .NET Core SDK)
+You should use `run.ps1` (Windows) or `run.sh` (Linux) to execute NBXplorer, but you can also execute it manually with the following command:
+```dotnet run --no-launch-profile -p .\NBXplorer\NBXplorer.csproj -- <parameters>```
 
-#### From Built DLL (.NET Core Runtime required)
-```dotnet NBXplorer.dll --port=20300 --network=mainnet --nodeendpoint=127.0.0.1:32939```
+#### Run using built DLL (requires .NET Core Runtime only)
+If you already have a compiled DLL, you can run the executable with the following command:
+```dotnet NBXplorer.dll <parameters>```
+
+#### Sample parameters
+Running NBXplorer HTTP server on port 20300, connecting to the BTC mainnet node locally.
+```--port=20300 --network=mainnet --btcnodeendpoint=127.0.0.1:32939```
+
+Running NBXplorer on testnet, supporting Bitcoin, Litecoin and Dash, using cookie authentication for BTC and LTC, and RPC username and password for Dash, connecting to all of them locally. 
+```--chains=btc,ltc,dash --network=testnet --dashrpcuser=myuser --dashrpcpassword=mypassword```
+
 
 ### Environment variables
 
@@ -144,9 +179,10 @@ If you need to see old payments, you need to configure `startheight` to a specif
 ### Using Postman
 [Postman](https://www.getpostman.com) is a useful tool for testing and experimenting with REST API's. 
 
-You can test the NBXplorer API quickly and easily using Postman as follows :
-* Assumption: you are using the default Cookie Auth , you are running NBXplorer on the same machine as your BTC (or other supported crypto) node or NBXplorer can access the blockchain data files.
-* Run NBXplorer and locate you cookie file - note NBXplorer will generate a new Cookie file each time it runs
+You can test the [NBXplorer API](docs/API.md) quickly and easily using Postman.
+
+If you use cookie authentication (enabled by default) in your locally run NBXplorer, you need to set that up in Postman:
+* Run NBXplorer and locate you cookie file (NBXplorer will generate a new Cookie file each time it runs in [its default data folder](docs/API.md#authentication))
 * In Postman create a new GET API test
 * In Authorization select *Basic Auth*, you should see 2 input boxes for username and password
 * Open your cookie file with a text editor e.g. Notepad on windows . You should see a cookie string e.g. `__cookie__:0ff9cd83a5ac7c19a6b56a3d1e7a5c96e113d42dba7720a1f72a3a5e8c4b6c66`
@@ -154,6 +190,13 @@ You can test the NBXplorer API quickly and easily using Postman as follows :
 * Paste the Hex string (after the : ) into the password box
 * Click the Update Request button in Postman - this will force Postman to generate the correct HTTP headers based on your cookie details
 * You should now see a new entry in the Headers section with a Key of *Authorization* and Value of *Basic xxxxxxxxx* where the string after `Basic` will be your Base64 encoded username and password.
+* Enter the API URL you are going to test
+
+You can also disable authentication in NBXplorer for testing with the `--noauth` parameter. This makes testing quicker:
+* Run NBXplorer with the `--noauth` parameter
+* In Postman create a new GET API test
+* In Authorization select *No Auth*
+* Enter the API URL you are going to test
 
 You are now ready to test the API - it is easiest to start with something simple such as the fees endpoint e.g.
 

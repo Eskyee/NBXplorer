@@ -3,7 +3,6 @@ using NBitcoin;
 using System.Reflection;
 using System;
 using System.Threading.Tasks;
-using Microsoft.AspNetCore.Mvc.Internal;
 using NBXplorer.DerivationStrategy;
 
 namespace NBXplorer.ModelBinders
@@ -39,6 +38,7 @@ namespace NBXplorer.ModelBinders
 
 			var networkProvider = (NBXplorer.NBXplorerNetworkProvider)bindingContext.HttpContext.RequestServices.GetService(typeof(NBXplorer.NBXplorerNetworkProvider));
 			var cryptoCode = bindingContext.ValueProvider.GetValue("cryptoCode").FirstValue;
+			cryptoCode = cryptoCode ?? bindingContext.ValueProvider.GetValue("network").FirstValue;
 			var network = networkProvider.GetFromCryptoCode((cryptoCode ?? "BTC"));
 			try
 			{

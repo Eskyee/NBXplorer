@@ -20,7 +20,8 @@ namespace NBXplorer.Tests
 		{
 			_Name = name;
 			ServerTester.DeleteFolderRecursive(name);
-			_Provider = new RepositoryProvider(new NBXplorerNetworkProvider(NetworkType.Regtest), 
+			_Provider = new RepositoryProvider(new NBXplorerNetworkProvider(NetworkType.Regtest),
+											   KeyPathTemplates.Default,
 											   new Configuration.ExplorerConfiguration()
 											   {
 												   DataDir = name,
@@ -33,12 +34,13 @@ namespace NBXplorer.Tests
 													   }
 												   }
 											   });
+			_Provider.StartAsync().GetAwaiter().GetResult();
 			_Repository = _Provider.GetRepository(new NBXplorerNetworkProvider(NetworkType.Regtest).GetFromCryptoCode("BTC"));
 		}
 
 		public void Dispose()
 		{
-			_Provider.Dispose();
+			_Provider.DisposeAsync().GetAwaiter().GetResult();
 			ServerTester.DeleteFolderRecursive(_Name);
 		}
 

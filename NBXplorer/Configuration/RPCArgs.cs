@@ -85,8 +85,6 @@ namespace NBXplorer.Configuration
 					}
 				}
 			}
-			// 10 min of timeout because scantxoutset can take long
-			rpcClient.RequestTimeout = TimeSpan.FromMinutes(10.0);
 			return rpcClient;
 		}
 
@@ -96,7 +94,7 @@ namespace NBXplorer.Configuration
 			Logs.Configuration.LogInformation($"{networkInfo.CryptoCode}: Testing RPC connection to " + rpcClient.Address.AbsoluteUri);
 			try
 			{
-				var address = new Key().PubKey.GetAddress(network);
+				var address = new Key().PubKey.GetAddress(ScriptPubKeyType.Legacy, network);
 				int time = 0;
 				while(true)
 				{
@@ -133,7 +131,7 @@ namespace NBXplorer.Configuration
 				Logs.Configuration.LogError($"{networkInfo.CryptoCode}: Error connecting to RPC server " + ex.Message);
 				throw new ConfigException();
 			}
-			Logs.Configuration.LogInformation($"{networkInfo.CryptoCode}: RPC connection successfull");
+			Logs.Configuration.LogInformation($"{networkInfo.CryptoCode}: RPC connection successful");
 			var capabilities = await rpcClient.ScanRPCCapabilitiesAsync();
 			if(capabilities.Version < networkInfo.MinRPCVersion)
 			{

@@ -14,6 +14,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Net.WebSockets;
+using Newtonsoft.Json.Linq;
 
 namespace NBXplorer
 {
@@ -134,6 +135,18 @@ namespace NBXplorer
 			return GetTransactionAsync(txId, cancellation).GetAwaiter().GetResult();
 		}
 
+		public async Task<PruneResponse> PruneAsync(DerivationStrategyBase extKey, CancellationToken cancellation = default)
+		{
+			if (extKey == null)
+				throw new ArgumentNullException(nameof(extKey));
+			return await SendAsync<PruneResponse>(HttpMethod.Post, null, "v1/cryptos/{0}/derivations/{1}/prune", new object[] { Network.CryptoCode, extKey }, cancellation).ConfigureAwait(false);
+		}
+
+		public PruneResponse Prune(DerivationStrategyBase extKey, CancellationToken cancellation = default)
+		{
+			return PruneAsync(extKey, cancellation).GetAwaiter().GetResult();
+		}
+
 		public async Task ScanUTXOSetAsync(DerivationStrategyBase extKey, int? batchSize = null, int? gapLimit = null, int? fromIndex = null, CancellationToken cancellation = default)
 		{
 			if (extKey == null)
@@ -231,6 +244,17 @@ namespace NBXplorer
 		public Task TrackAsync(DerivationStrategyBase strategy, CancellationToken cancellation = default)
 		{
 			return TrackAsync(TrackedSource.Create(strategy), cancellation);
+		}
+
+		public void Track(DerivationStrategyBase strategy, TrackWalletRequest trackDerivationRequest, CancellationToken cancellation = default)
+		{
+			TrackAsync(strategy, trackDerivationRequest, cancellation).GetAwaiter().GetResult();
+		}
+		public async Task TrackAsync(DerivationStrategyBase strategy, TrackWalletRequest trackDerivationRequest, CancellationToken cancellation = default)
+		{
+			if (strategy == null)
+				throw new ArgumentNullException(nameof(strategy));
+			await SendAsync<string>(HttpMethod.Post, trackDerivationRequest, "v1/cryptos/{0}/derivations/{1}", new[] { CryptoCode, strategy.ToString() }, cancellation).ConfigureAwait(false);
 		}
 
 		public void Track(TrackedSource trackedSource, CancellationToken cancellation = default)
@@ -415,6 +439,29 @@ namespace NBXplorer
 		{
 			return GetAsync<GetFeeRateResult>("v1/cryptos/{0}/fees/{1}", new object[] { CryptoCode, blockCount }, cancellation);
 		}
+		public CreatePSBTResponse CreatePSBT(DerivationStrategyBase derivationStrategy, CreatePSBTRequest request, CancellationToken cancellation = default)
+		{
+			return CreatePSBTAsync(derivationStrategy, request, cancellation).GetAwaiter().GetResult();
+		}
+		public Task<CreatePSBTResponse> CreatePSBTAsync(DerivationStrategyBase derivationStrategy, CreatePSBTRequest request, CancellationToken cancellation = default)
+		{
+			if (derivationStrategy == null)
+				throw new ArgumentNullException(nameof(derivationStrategy));
+			if (request == null)
+				throw new ArgumentNullException(nameof(request));
+			return this.SendAsync<CreatePSBTResponse>(HttpMethod.Post, request, "v1/cryptos/{0}/derivations/{1}/psbt/create", new object[] { CryptoCode, derivationStrategy }, cancellation);
+		}
+
+		public UpdatePSBTResponse UpdatePSBT(UpdatePSBTRequest request, CancellationToken cancellation = default)
+		{
+			return UpdatePSBTAsync(request, cancellation).GetAwaiter().GetResult();
+		}
+		public Task<UpdatePSBTResponse> UpdatePSBTAsync(UpdatePSBTRequest request, CancellationToken cancellation = default)
+		{
+			if (request == null)
+				throw new ArgumentNullException(nameof(request));
+			return this.SendAsync<UpdatePSBTResponse>(HttpMethod.Post, request, "v1/cryptos/{0}/psbt/update", new object[] { CryptoCode }, cancellation);
+		}
 
 		public BroadcastResult Broadcast(Transaction tx, CancellationToken cancellation = default)
 		{
@@ -424,6 +471,29 @@ namespace NBXplorer
 		public Task<BroadcastResult> BroadcastAsync(Transaction tx, CancellationToken cancellation = default)
 		{
 			return SendAsync<BroadcastResult>(HttpMethod.Post, tx.ToBytes(), "v1/cryptos/{0}/transactions", new[] { CryptoCode }, cancellation);
+		}
+
+		public TMetadata GetMetadata<TMetadata>(DerivationStrategyBase derivationScheme, string key, CancellationToken cancellationToken = default)
+		{
+			return GetMetadataAsync<TMetadata>(derivationScheme, key, cancellationToken).GetAwaiter().GetResult();
+		}
+		public Task<TMetadata> GetMetadataAsync<TMetadata>(DerivationStrategyBase derivationScheme, string key, CancellationToken cancellationToken = default)
+		{
+			if (derivationScheme == null)
+				throw new ArgumentNullException(nameof(derivationScheme));
+			if (key == null)
+				throw new ArgumentNullException(nameof(key));
+			return GetAsync<TMetadata>("v1/cryptos/{0}/derivations/{1}/metadata/{2}", new object[] { CryptoCode, derivationScheme, key }, cancellationToken);
+		}
+
+		public void SetMetadata<TMetadata>(DerivationStrategyBase derivationScheme, string key, TMetadata value, CancellationToken cancellationToken = default)
+		{
+			SetMetadataAsync<TMetadata>(derivationScheme, key, value, cancellationToken).GetAwaiter().GetResult();
+		}
+		
+		public Task SetMetadataAsync<TMetadata>(DerivationStrategyBase derivationScheme, string key, TMetadata value, CancellationToken cancellationToken = default)
+		{
+			return SendAsync<string>(HttpMethod.Post, value, "v1/cryptos/{0}/derivations/{1}/metadata/{2}", new object[] { CryptoCode, derivationScheme, key }, cancellationToken);
 		}
 
 		private static readonly HttpClient SharedClient = new HttpClient();
@@ -514,7 +584,6 @@ namespace NBXplorer
 				else
 					message.Content = new StringContent(Serializer.ToString(body), Encoding.UTF8, "application/json");
 			}
-
 			return message;
 		}
 

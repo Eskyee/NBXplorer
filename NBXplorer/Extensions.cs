@@ -29,25 +29,16 @@ using NBXplorer.Authentication;
 using NBitcoin.DataEncoders;
 using System.Text.RegularExpressions;
 using NBXplorer.MessageBrokers;
+using NBitcoin.Protocol;
 
 namespace NBXplorer
 {
 	public static class Extensions
 	{
-		internal static Task WaitOneAsync(this WaitHandle waitHandle)
+		internal static void AddRange<T>(this HashSet<T> hashset, IEnumerable<T> elements)
 		{
-			if(waitHandle == null)
-				throw new ArgumentNullException("waitHandle");
-
-			var tcs = new TaskCompletionSource<bool>();
-			var rwh = ThreadPool.RegisterWaitForSingleObject(waitHandle,
-				delegate
-				{
-					tcs.TrySetResult(true);
-				}, null, TimeSpan.FromMinutes(1.0), true);
-			var t = tcs.Task;
-			t.ContinueWith(_ => rwh.Unregister(null));
-			return t;
+			foreach (var el in elements)
+				hashset.Add(el);
 		}
 		internal static uint160 GetHash(this DerivationStrategyBase derivation)
 		{
@@ -85,7 +76,7 @@ namespace NBXplorer
 			}
 			return keyPathInformation;
 		}
-
+#if NETCOREAPP21
 		class MVCConfigureOptions : IConfigureOptions<MvcJsonOptions>
 		{
 			public void Configure(MvcJsonOptions options)
@@ -93,6 +84,7 @@ namespace NBXplorer
 				new Serializer(null).ConfigureSerializer(options.SerializerSettings);
 			}
 		}
+#endif
 
 		public class ConfigureCookieFileBasedConfiguration : IConfigureNamedOptions<BasicAuthenticationOptions>
 		{
@@ -138,7 +130,12 @@ namespace NBXplorer
 				mvc.Filters.Add(new NBXplorerExceptionFilter());
 			});
 
+#if NETCOREAPP21
 			services.AddSingleton<IConfigureOptions<MvcJsonOptions>, MVCConfigureOptions>();
+			services.AddSingleton<MvcNewtonsoftJsonOptions>();
+#else
+			services.AddSingleton<MvcNewtonsoftJsonOptions>(o =>  o.GetRequiredService<IOptions<MvcNewtonsoftJsonOptions>>().Value);
+#endif
 			services.TryAddSingleton<ChainProvider>();
 
 			services.TryAddSingleton<CookieRepository>();
@@ -146,13 +143,21 @@ namespace NBXplorer
 			services.TryAddSingleton<EventAggregator>();
 			services.TryAddSingleton<AddressPoolServiceAccessor>();
 			services.AddSingleton<IHostedService, AddressPoolService>();
-			services.TryAddSingleton<BitcoinDWaitersAccessor>();
+			services.TryAddSingleton<BitcoinDWaiters>();
+			services.TryAddSingleton<RebroadcasterHostedService>();
 			services.AddSingleton<IHostedService, ScanUTXOSetService>();
 			services.TryAddSingleton<ScanUTXOSetServiceAccessor>();
-			services.AddSingleton<IHostedService, BitcoinDWaiters>();
+			services.AddSingleton<IHostedService, BitcoinDWaiters>(o => o.GetRequiredService<BitcoinDWaiters>());
+			services.AddSingleton<IHostedService, RebroadcasterHostedService>(o => o.GetRequiredService<RebroadcasterHostedService>());
 			services.AddSingleton<IHostedService, BrokerHostedService>();
 
 			services.AddSingleton<ExplorerConfiguration>(o => o.GetRequiredService<IOptions<ExplorerConfiguration>>().Value);
+
+			services.AddSingleton<KeyPathTemplates>(o =>
+			{
+				var conf = o.GetRequiredService<IOptions<ExplorerConfiguration>>().Value;
+				return new KeyPathTemplates(conf.CustomKeyPathTemplate);
+			});
 
 			services.AddSingleton<NBXplorerNetworkProvider>(o =>
 			{

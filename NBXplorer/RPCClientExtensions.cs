@@ -43,11 +43,28 @@ namespace NBXplorer
 
 	public class GetNetworkInfoResponse
 	{
-		public double relayfee
+		public class LocalAddress
+		{
+			public string address { get; set; }
+			public int port { get; set; }
+		}
+		public double? relayfee
 		{
 			get; set;
 		}
-		public double incrementalfee
+		public FeeRate GetRelayFee()
+		{
+			return relayfee == null ? null : new FeeRate(Money.Coins((decimal)relayfee), 1000);
+		}
+		public double? incrementalfee
+		{
+			get; set;
+		}
+		public FeeRate GetIncrementalFee()
+		{
+			return incrementalfee == null ? null : new FeeRate(Money.Coins((decimal)incrementalfee), 1000);
+		}
+		public LocalAddress[] localaddresses
 		{
 			get; set;
 		}

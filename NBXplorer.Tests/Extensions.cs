@@ -42,7 +42,7 @@ namespace NBXplorer.Tests
 			if (txIds == null || txIds.Length == 0)
 				return;
 			HashSet<uint256> txidsSet = new HashSet<uint256>(txIds);
-			using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+			using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20)))
 			{
 				while (true)
 				{
@@ -56,19 +56,12 @@ namespace NBXplorer.Tests
 			}
 		}
 
-		public static IEnumerable<Transaction> TopologicalSort(this IEnumerable<Transaction> transactions)
+		public static DerivationLine GetLineFor(this DerivationStrategyBase strategy, DerivationFeature feature)
 		{
-			return transactions
-				.Select(t => t.AsAnnotatedTransaction()).ToList()
-				.TopologicalSort()
-				.Select(t => t.Record.Transaction);
+			return strategy.GetLineFor(KeyPathTemplates.Default.GetKeyPathTemplate(feature));
 		}
 
-		static BitcoinAddress Dummy = new Key().PubKey.GetAddress(Network.Main);
-		static AnnotatedTransaction AsAnnotatedTransaction(this Transaction tx)
-		{
-			return new AnnotatedTransaction(new TrackedTransaction(new TrackedTransactionKey(tx.GetHash(), null, false), new AddressTrackedSource(Dummy), tx, new Dictionary<Script, KeyPath>()), null);
-		}
+		static BitcoinAddress Dummy = new Key().PubKey.GetAddress(ScriptPubKeyType.Legacy, Network.Main);
 		public static KeyPathInformation GetKeyInformation(this Repository repo, Script script)
 		{
 			return repo.GetKeyInformations(new Script[] { script }).GetAwaiter().GetResult()[script].SingleOrDefault();

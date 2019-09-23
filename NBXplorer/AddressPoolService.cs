@@ -23,63 +23,105 @@ namespace NBXplorer
 	}
 	public class AddressPoolService : IHostedService
 	{
-		RepositoryProvider _RepositoryProvider;
-		public AddressPoolService(RepositoryProvider repositoryProvider, AddressPoolServiceAccessor accessor)
+		class RefillPoolRequest
 		{
-			accessor.Instance = this;
-			_RepositoryProvider = repositoryProvider;
+			public DerivationStrategyBase DerivationStrategy { get; set; }
+			public DerivationFeature Feature { get; set; }
+			public TaskCompletionSource<bool> Done { get; set; }
+			public GenerateAddressQuery GenerateAddressQuery { get; set; }
 		}
-		Task _Task;
-		public Task StartAsync(CancellationToken cancellationToken)
+		class AddressPool
 		{
-			_Task = Listen();
-			return Task.CompletedTask;
-		}
+			Repository _Repository;
+			Task _Task;
+			CancellationTokenSource _Cts;
+			internal Channel<RefillPoolRequest> _Channel = Channel.CreateUnbounded<RefillPoolRequest>();
 
-		Channel<(NBXplorerNetwork Network, DerivationStrategyBase DerivationStrategy, DerivationFeature Feature)> _Channel = Channel.CreateUnbounded<(NBXplorerNetwork Network, DerivationStrategyBase DerivationStrategy, DerivationFeature Feature)>();
-
-		public void RefillAddressPoolIfNeeded(NBXplorerNetwork network, DerivationStrategyBase derivationStrategy, DerivationFeature feature)
-		{
-			_Channel.Writer.TryWrite((network, derivationStrategy, feature));
-		}
-
-		const int RefillBatchSize = 3;
-		private async Task Listen()
-		{
-			while(await _Channel.Reader.WaitToReadAsync() && _Channel.Reader.TryRead(out var item))
+			public AddressPool(Repository repository)
 			{
-				var repo = _RepositoryProvider.GetRepository(item.Network);
-				int generated = 0;
-				while(true)
+				_Repository = repository;
+			}
+			public Task StartAsync(CancellationToken cancellationToken)
+			{
+				_Cts = new CancellationTokenSource();
+				_Task = Listen(_Cts.Token);
+				return Task.CompletedTask;
+			}
+			public Task StopAsync(CancellationToken cancellationToken)
+			{
+				_Channel.Writer.Complete();
+				_Cts.Cancel();
+				return _Task;
+			}
+
+			private async Task Listen(CancellationToken cancellationToken)
+			{
+				while (await _Channel.Reader.WaitToReadAsync(cancellationToken))
 				{
-					var count = await repo.RefillAddressPoolIfNeeded(item.DerivationStrategy, item.Feature, RefillBatchSize);
-					if(count == 0)
-						break;
-					generated += count;
+					RefillPoolRequest modelItem = null;
+					try
+					{
+						_Channel.Reader.TryRead(out modelItem);
+						if (modelItem == null)
+							continue;
+						var c = await _Repository.GenerateAddresses(modelItem.DerivationStrategy, modelItem.Feature, modelItem.GenerateAddressQuery);
+						modelItem.Done?.TrySetResult(true);
+					}
+					catch (Exception ex)
+					{
+						modelItem?.Done.TrySetException(ex);
+						Logs.Explorer.LogError(ex, $"{_Repository.Network.CryptoCode}: Error in the Listen of the AddressPoolService");
+						await Task.Delay(1000, cancellationToken);
+					}
 				}
-				//if(generated != 0)
-				//	Logs.Explorer.LogInformation($"{item.Network.CryptoCode}: Generated {generated} addresses for {item.DerivationStrategy.ToPrettyStrategyString()} ({item.Feature})");
 			}
 		}
 
-		public Task StopAsync(CancellationToken cancellationToken)
+		public AddressPoolService(NBXplorerNetworkProvider networks, RepositoryProvider repositoryProvider, KeyPathTemplates keyPathTemplates, AddressPoolServiceAccessor accessor)
 		{
-			_Channel.Writer.Complete();
-			return _Channel.Reader.Completion;
+			accessor.Instance = this;
+			_AddressPoolByNetwork = networks.GetAll().ToDictionary(o => o, o => new AddressPool(repositoryProvider.GetRepository(o)));
+			this.keyPathTemplates = keyPathTemplates;
+		}
+		Dictionary<NBXplorerNetwork, AddressPool> _AddressPoolByNetwork;
+		private readonly KeyPathTemplates keyPathTemplates;
+
+		public Task StartAsync(CancellationToken cancellationToken)
+		{
+			return Task.WhenAll(_AddressPoolByNetwork.Select(kv => kv.Value.StartAsync(cancellationToken)));
 		}
 
-		internal void RefillAddressPoolIfNeeded(NBXplorerNetwork network, TrackedTransaction[] matches)
+		public Task GenerateAddresses(NBXplorerNetwork network, DerivationStrategyBase derivationStrategy, DerivationFeature feature, GenerateAddressQuery generateAddressQuery = null)
 		{
-			foreach(var m in matches)
+			var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+			if (!_AddressPoolByNetwork[network]._Channel.Writer.TryWrite(new RefillPoolRequest() { DerivationStrategy = derivationStrategy, Feature = feature, Done = completion, GenerateAddressQuery = generateAddressQuery }))
+				completion.TrySetCanceled();
+			return completion.Task;
+		}
+
+		public async Task StopAsync(CancellationToken cancellationToken)
+		{
+			try
+			{
+				await Task.WhenAll(_AddressPoolByNetwork.Select(kv => kv.Value.StopAsync(cancellationToken)));
+			}
+			catch { }
+		}
+
+		internal Task GenerateAddresses(NBXplorerNetwork network, TrackedTransaction[] matches)
+		{
+			List<Task> refill = new List<Task>();
+			foreach (var m in matches)
 			{
 				var derivationStrategy = (m.TrackedSource as Models.DerivationSchemeTrackedSource)?.DerivationStrategy;
 				if (derivationStrategy == null)
-						continue;
-				foreach (var feature in m.KnownKeyPathMapping.Select(kv => DerivationStrategyBase.GetFeature(kv.Value)))
+					continue;
+				foreach (var feature in m.KnownKeyPathMapping.Select(kv => keyPathTemplates.GetDerivationFeature(kv.Value)))
 				{
-					RefillAddressPoolIfNeeded(network, derivationStrategy, feature);
+					refill.Add(GenerateAddresses(network, derivationStrategy, feature));
 				}
 			}
+			return Task.WhenAll(refill.ToArray());
 		}
 	}
 }

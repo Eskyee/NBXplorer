@@ -8,47 +8,71 @@ using System.Text;
 namespace NBXplorer
 {
 	public static class Utils
-	{	
-		/// <summary>
-		/// Make sure that if transaction A spend UTXO of transaction B then the output will order A first, and B second
-		/// </summary>
-		/// <param name="transactions">Unordered collection</param>
-		/// <returns>Topologically ordered collection</returns>
-		public static IEnumerable<AnnotatedTransaction> TopologicalSort(this ICollection<AnnotatedTransaction> transactions)
+	{
+		public static ICollection<AnnotatedTransaction> TopologicalSort(this ICollection<AnnotatedTransaction> transactions)
 		{
-			return transactions.TopologicalSort<AnnotatedTransaction>(DependsOn(transactions));
+			return transactions.TopologicalSort(
+				dependsOn: t => t.Record.SpentOutpoints.Select(o => o.Hash),
+				getKey: t => t.Record.TransactionHash,
+				getValue: t => t,
+				solveTies: AnnotatedTransactionComparer.OldToYoung);
+		}
+		public static List<T> TopologicalSort<T>(this ICollection<T> nodes, Func<T, IEnumerable<T>> dependsOn)
+		{
+			return nodes.TopologicalSort(dependsOn, k => k, k => k);
 		}
 
-		static Func<AnnotatedTransaction, IEnumerable<AnnotatedTransaction>> DependsOn(IEnumerable<AnnotatedTransaction> transactions)
+		public static List<T> TopologicalSort<T, TDepend>(this ICollection<T> nodes, Func<T, IEnumerable<TDepend>> dependsOn, Func<T, TDepend> getKey)
 		{
-			return t =>
-			{
-				HashSet<uint256> spent = new HashSet<uint256>(t.Record.SpentOutpoints.Select(txin => txin.Hash));
-				return transactions.Where(u => spent.Contains(u.Record.TransactionHash) ||  //Depends on parent transaction
-												(u.Height.HasValue && t.Height.HasValue && u.Height.Value < t.Height.Value) ); //Depends on earlier transaction
-			};
+			return nodes.TopologicalSort(dependsOn, getKey, o => o);
 		}
 
-		public static IEnumerable<T> TopologicalSort<T>(this IEnumerable<T> nodes,
-												Func<T, IEnumerable<T>> dependsOn)
+		public static List<TValue> TopologicalSort<T, TDepend, TValue>(this ICollection<T> nodes,
+												Func<T, IEnumerable<TDepend>> dependsOn,
+												Func<T, TDepend> getKey,
+												Func<T, TValue> getValue,
+												IComparer<T> solveTies = null)
 		{
-			List<T> result = new List<T>();
-			var elems = nodes.ToDictionary(node => node,
-										   node => new HashSet<T>(dependsOn(node)));
-			while(elems.Count > 0)
+			if (nodes.Count == 0)
+				return new List<TValue>();
+			if (getKey == null)
+				throw new ArgumentNullException(nameof(getKey));
+			if (getValue == null)
+				throw new ArgumentNullException(nameof(getValue));
+			solveTies = solveTies ?? Comparer<T>.Default;
+			List<TValue> result = new List<TValue>(nodes.Count);
+			HashSet<TDepend> allKeys = new HashSet<TDepend>(nodes.Count);
+			var noDependencies = new SortedDictionary<T, HashSet<TDepend>>(solveTies);
+
+			foreach (var node in nodes)
+				allKeys.Add(getKey(node));
+			var dependenciesByValues = nodes.ToDictionary(node => node,
+										   node => new HashSet<TDepend>(dependsOn(node).Where(n => allKeys.Contains(n))));
+			foreach (var e in dependenciesByValues.Where(x => x.Value.Count == 0))
 			{
-				var elem = elems.FirstOrDefault(x => x.Value.Count == 0);
-				if(elem.Key == null)
+				noDependencies.Add(e.Key, e.Value);
+			}
+			if (noDependencies.Count == 0)
+			{
+				throw new InvalidOperationException("Impossible to topologically sort a cyclic graph");
+			}
+			while (noDependencies.Count > 0)
+			{
+				var nodep = noDependencies.First();
+				noDependencies.Remove(nodep.Key);
+				dependenciesByValues.Remove(nodep.Key);
+
+				var elemKey = getKey(nodep.Key);
+				result.Add(getValue(nodep.Key));
+				foreach (var selem in dependenciesByValues)
 				{
-					//cycle detected can't order
-					return nodes;
+					if (selem.Value.Remove(elemKey) && selem.Value.Count == 0)
+						noDependencies.Add(selem.Key, selem.Value);
 				}
-				elems.Remove(elem.Key);
-				foreach(var selem in elems)
-				{
-					selem.Value.Remove(elem.Key);
-				}
-				result.Add(elem.Key);
+			}
+			if (dependenciesByValues.Count != 0)
+			{
+				throw new InvalidOperationException("Impossible to topologically sort a cyclic graph");
 			}
 			return result;
 		}
