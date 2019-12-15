@@ -25,10 +25,6 @@ using NBXplorer.DerivationStrategy;
 
 namespace NBXplorer.Tests
 {
-	public class ServerParams
-	{
-		public string AutoPruning { get; set; }
-	}
 	public partial class ServerTester : IDisposable
 	{
 		private readonly string _Directory;
@@ -36,6 +32,10 @@ namespace NBXplorer.Tests
 		public static ServerTester Create([CallerMemberNameAttribute]string caller = null)
 		{
 			return new ServerTester(caller);
+		}
+		public static ServerTester CreateNoAutoStart([CallerMemberNameAttribute]string caller = null)
+		{
+			return new ServerTester(caller, false);
 		}
 
 		public void Dispose()
@@ -59,21 +59,27 @@ namespace NBXplorer.Tests
 			get; set;
 		}
 
-		public ServerTester(string directory)
+		public ServerTester(string directory, bool autoStart = true)
 		{
 			SetEnvironment();
+			var rootTestData = "TestData";
+			directory = Path.Combine(rootTestData, directory);
+			_Directory = directory;
+			if (!Directory.Exists(rootTestData))
+				Directory.CreateDirectory(rootTestData);
+			if (autoStart)
+				Start();
+		}
+
+		public void Start()
+		{
 			try
 			{
-				var rootTestData = "TestData";
-				directory = Path.Combine(rootTestData, directory);
-				_Directory = directory;
-				if (!Directory.Exists(rootTestData))
-					Directory.CreateDirectory(rootTestData);
-
 				var cryptoSettings = new NBXplorerNetworkProvider(NetworkType.Regtest).GetFromCryptoCode(CryptoCode);
-				NodeBuilder = NodeBuilder.Create(nodeDownloadData, Network, directory);
+				NodeBuilder = NodeBuilder.Create(nodeDownloadData, Network, _Directory);
 
 				Explorer = NodeBuilder.CreateNode();
+				Explorer.ConfigParameters.Add("txindex", "1");
 				foreach (var node in NodeBuilder.Nodes)
 				{
 					node.WhiteBind = true;
@@ -82,7 +88,7 @@ namespace NBXplorer.Tests
 				NodeBuilder.StartAll();
 				Explorer.CreateRPCClient().EnsureGenerate(Network.Consensus.CoinbaseMaturity + 1);
 
-				datadir = Path.Combine(directory, "explorer");
+				datadir = Path.Combine(_Directory, "explorer");
 				DeleteFolderRecursive(datadir);
 				StartNBXplorer();
 				this.Client.WaitServerStarted();
@@ -94,6 +100,7 @@ namespace NBXplorer.Tests
 			}
 		}
 
+		public bool UseRabbitMQ { get; set; } = false;
 		private void StartNBXplorer()
 		{
 			var port = CustomServer.FreeTcpPort();
@@ -117,8 +124,17 @@ namespace NBXplorer.Tests
 			keyValues.Add(("asbtranq", AzureServiceBusTestConfig.NewTransactionQueue));
 			keyValues.Add(("asbblockt", AzureServiceBusTestConfig.NewBlockTopic));
 			keyValues.Add(("asbtrant", AzureServiceBusTestConfig.NewTransactionTopic));
-
-			var args = keyValues.SelectMany(kv => new[] { $"--{kv.key}", kv.value }).ToArray();
+			if (UseRabbitMQ)
+			{
+				keyValues.Add(("rmqhost", RabbitMqTestConfig.RabbitMqHostName));
+				keyValues.Add(("rmqvirtual", RabbitMqTestConfig.RabbitMqVirtualHost));
+				keyValues.Add(("rmquser", RabbitMqTestConfig.RabbitMqUsername));
+				keyValues.Add(("rmqpass", RabbitMqTestConfig.RabbitMqPassword));
+				keyValues.Add(("rmqtranex", RabbitMqTestConfig.RabbitMqTransactionExchange));
+				keyValues.Add(("rmqblockex", RabbitMqTestConfig.RabbitMqBlockExchange));
+			}
+			var args = keyValues.SelectMany(kv => new[] { $"--{kv.key}", kv.value }
+			.Concat(new[] { $"--{CryptoCode.ToLowerInvariant()}hastxindex" })).ToArray();
 			Host = new WebHostBuilder()
 				.UseConfiguration(new DefaultConfiguration().CreateConfiguration(args))
 				.UseKestrel()
@@ -135,12 +151,11 @@ namespace NBXplorer.Tests
 				.Build();
 
 			RPC = ((RPCClientProvider)Host.Services.GetService(typeof(RPCClientProvider))).GetRPCClient(CryptoCode);
-			var nbxnetwork = ((NBXplorerNetworkProvider)Host.Services.GetService(typeof(NBXplorerNetworkProvider))).GetFromCryptoCode(CryptoCode);
-			Network = nbxnetwork.NBitcoinNetwork;
+			NBXplorerNetwork = ((NBXplorerNetworkProvider)Host.Services.GetService(typeof(NBXplorerNetworkProvider))).GetFromCryptoCode(CryptoCode);
 			var conf = (ExplorerConfiguration)Host.Services.GetService(typeof(ExplorerConfiguration));
 			Host.Start();
 			Configuration = conf;
-			_Client = new ExplorerClient(nbxnetwork, Address);
+			_Client = NBXplorerNetwork.CreateExplorerClient(Address);
 			_Client.SetCookieAuth(Path.Combine(conf.DataDir, ".cookie"));
 			Notifications = _Client.CreateLongPollingNotificationSession();
 		}
@@ -177,7 +192,7 @@ namespace NBXplorer.Tests
 			return ((T)(Host.Services.GetService(typeof(T))));
 		}
 
-		public ExplorerConfiguration Configuration { get; private set;  }
+		public ExplorerConfiguration Configuration { get; private set; }
 
 		ExplorerClient _Client;
 		public ExplorerClient Client
@@ -218,6 +233,13 @@ namespace NBXplorer.Tests
 		}
 
 		public Network Network
+		{
+			get
+			{
+				return NBXplorerNetwork.NBitcoinNetwork;
+			}
+		}
+		public NBXplorerNetwork NBXplorerNetwork
 		{
 			get;
 			internal set;
@@ -323,7 +345,7 @@ namespace NBXplorer.Tests
 			pubKey = pubKey ?? new ExtKey().Neuter();
 			string suffix = this.RPC.Capabilities.SupportSegwit ? "" : "-[legacy]";
 			suffix += p2sh ? "-[p2sh]" : "";
-			return new DerivationStrategyFactory(this.Network).Parse($"{pubKey.ToString(this.Network)}{suffix}");
+			return NBXplorerNetwork.DerivationStrategyFactory.Parse($"{pubKey.ToString(this.Network)}{suffix}");
 		}
 
 		public bool RPCStringAmount

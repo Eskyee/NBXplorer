@@ -42,6 +42,7 @@ namespace NBXplorer.Configuration
 				app.Option($"--{crypto}rpcurl", $"The RPC server url (default: default rpc server depended on the network)", CommandOptionType.SingleValue);
 				app.Option($"--{crypto}startheight", $"The height where starting the scan (default: where your rpc server was synched when you first started this program)", CommandOptionType.SingleValue);
 				app.Option($"--{crypto}nodeendpoint", $"The p2p connection to a Bitcoin node, make sure you are whitelisted (default: default p2p node on localhost, depends on network)", CommandOptionType.SingleValue);
+				app.Option($"--{crypto}hastxindex", "If true, NBXplorer will try to fetch missing transactions from the local node (default: false)", CommandOptionType.BoolValue);
 			}
 
 			app.Option("--asbcnstr", "[For Azure Service Bus] Azure Service Bus Connection string. New Block and New Transaction messages will be pushed to queues when this values is set", CommandOptionType.SingleValue);
@@ -49,12 +50,19 @@ namespace NBXplorer.Configuration
 			app.Option("--asbtranq", "[For Azure Service Bus] Name of Queue to push new transaction message to. Leave blank to turn off", CommandOptionType.SingleValue);
 			app.Option("--asbblockt", "[For Azure Service Bus] Name of Topic to push new block message to. Leave blank to turn off", CommandOptionType.SingleValue);
 			app.Option("--asbtrant", "[For Azure Service Bus] Name of Topic to push new transaction message to. Leave blank to turn off", CommandOptionType.SingleValue);
+
+			app.Option("--rmqhost", "[For RabbitMq] RabbitMq host name. Leave blank to turn off", CommandOptionType.SingleValue);
+			app.Option("--rmquser", "[For RabbitMq] RabbitMq username. Leave blank to turn off", CommandOptionType.SingleValue);
+			app.Option("--rmqpass", "[For RabbitMq] RabbitMq password. Leave blank to turn off", CommandOptionType.SingleValue);
+			app.Option("--rmqvirtual", "[For RabbitMq] RabbitMq virtual host.", CommandOptionType.SingleValue);
+			app.Option("--rmqtranex", "[For RabbitMq] Name of exchange to push transaction messages.", CommandOptionType.SingleValue);
+			app.Option("--rmqblockex", "[For RabbitMq] Name of exchange to push block messages.", CommandOptionType.SingleValue);
+
 			app.Option("--customkeypathtemplate", $"Define an additional derivation path tracked by NBXplorer (Format: m/1/392/*/29, default: empty)", CommandOptionType.SingleValue);
 			app.Option("--maxgapsize", $"The maximum gap address count on which the explorer will track derivation schemes (default: 30)", CommandOptionType.SingleValue);
 			app.Option("--mingapsize", $"The minimum gap address count on which the explorer will track derivation schemes (default: 20)", CommandOptionType.SingleValue);
 			app.Option("--signalfilesdir", $"The directory where files signaling if a chain is ready is created (default: the network specific datadir)", CommandOptionType.SingleValue);
 			app.Option("--noauth", $"Disable cookie authentication", CommandOptionType.BoolValue);
-			app.Option("--autopruning", $"EXPERIMENTAL: If getting UTXOs takes more than x seconds, NBXplorer will prune old transactions, disabled if set to -1 (default: -1)", CommandOptionType.SingleValue);
 			app.Option("--cachechain", $"Whether the chain of header is locally cached for faster startup (default: true)", CommandOptionType.SingleValue);
 			app.Option("--rpcnotest", $"Faster start because RPC connection testing skipped (default: false)", CommandOptionType.SingleValue);
 			app.Option("-v | --verbose", $"Verbose logs (default: true)", CommandOptionType.SingleValue);

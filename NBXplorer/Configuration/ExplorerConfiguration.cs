@@ -42,6 +42,7 @@ namespace NBXplorer.Configuration
 			get;
 			set;
 		}
+		public bool HasTxIndex { get; set; }
 	}
 	public class ExplorerConfiguration
 	{
@@ -70,7 +71,6 @@ namespace NBXplorer.Configuration
 			get;
 			set;
 		}
-		public TimeSpan? AutoPruningTime { get; set; }
 		public int MinGapSize
 		{
 			get; set;
@@ -135,6 +135,7 @@ namespace NBXplorer.Configuration
 					}
 
 					chainConfiguration.StartHeight = config.GetOrDefault<int>($"{network.CryptoCode}.startheight", -1);
+					chainConfiguration.HasTxIndex = config.GetOrDefault<bool>($"{network.CryptoCode}.hastxindex", false);
 
 					ChainConfigurations.Add(chainConfiguration);
 				}
@@ -144,9 +145,6 @@ namespace NBXplorer.Configuration
 				throw new ConfigException($"Invalid chains {invalidChains}");
 
 			Logs.Configuration.LogInformation("Supported chains: " + String.Join(',', supportedChains.ToArray()));
-			AutoPruningTime = TimeSpan.FromSeconds(config.GetOrDefault<int>("autopruning", -1));
-			if (AutoPruningTime.Value < TimeSpan.Zero)
-				AutoPruningTime = null;
 			MinGapSize = config.GetOrDefault<int>("mingapsize", 20);
 			MaxGapSize = config.GetOrDefault<int>("maxgapsize", 30);
 			if(MinGapSize >= MaxGapSize)
@@ -178,6 +176,13 @@ namespace NBXplorer.Configuration
 			AzureServiceBusTransactionQueue = config.GetOrDefault<string>("asbtranq", "");
 			AzureServiceBusBlockTopic = config.GetOrDefault<string>("asbblockt", "");
 			AzureServiceBusTransactionTopic = config.GetOrDefault<string>("asbtrant", "");
+
+			RabbitMqHostName = config.GetOrDefault<string>("rmqhost", "");
+			RabbitMqVirtualHost = config.GetOrDefault<string>("rmqvirtual", "");
+			RabbitMqUsername = config.GetOrDefault<string>("rmquser", "");
+			RabbitMqPassword = config.GetOrDefault<string>("rmqpass", "");
+			RabbitMqTransactionExchange = config.GetOrDefault<string>("rmqtranex", "");
+			RabbitMqBlockExchange = config.GetOrDefault<string>("rmqblockex", "");
 
 			return this;
 		}
@@ -234,6 +239,14 @@ namespace NBXplorer.Configuration
 			get;
 			set;
 		}
+
+		public string RabbitMqHostName { get; set; }
+        public string RabbitMqVirtualHost { get; set; }
+        public string RabbitMqUsername { get; set; }
+        public string RabbitMqPassword { get; set; }
+        public string RabbitMqTransactionExchange { get; set; }
+        public string RabbitMqBlockExchange { get; set; }
+
 		public KeyPathTemplate CustomKeyPathTemplate { get; set; }
-	}
+    }
 }

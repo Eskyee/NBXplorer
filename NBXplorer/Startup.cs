@@ -51,6 +51,7 @@ namespace NBXplorer
 #if NETCOREAPP21
 			builder.AddJsonFormatters();
 #else
+			services.AddHealthChecks().AddCheck<HealthChecks.NodesHealthCheck>("NodesHealthCheck");
 			builder.AddNewtonsoftJson(options =>
 			{
 				options.SerializerSettings.ContractResolver = new CamelCasePropertyNamesContractResolver();
@@ -84,12 +85,16 @@ namespace NBXplorer
 			app.UseAuthorization();
 #endif
 			app.UseWebSockets();
-			// app.UseMiddleware<LogAllRequestsMiddleware>();
+			//app.UseMiddleware<LogAllRequestsMiddleware>();
 #if NETCOREAPP21
 			app.UseMvc();
 #else
 			app.UseEndpoints(endpoints =>
 			{
+				endpoints.MapHealthChecks("health", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions()
+				{
+					ResponseWriter = HealthChecks.HealthCheckWriters.WriteJSON
+				});
 				endpoints.MapControllers();
 			});
 #endif

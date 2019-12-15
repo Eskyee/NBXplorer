@@ -13,7 +13,9 @@ namespace NBXplorer
 			{
 				MinRPCVersion = 140200,
 				ChainLoadingTimeout = TimeSpan.FromHours(1),
-				SupportCookieAuthentication = false
+				ChainCacheLoadingTimeout = TimeSpan.FromMinutes(2),
+				SupportCookieAuthentication = false,
+				CoinType = NetworkType == NetworkType.Mainnet ? new KeyPath("3'") : new KeyPath("1'")
 			});
 		}
 

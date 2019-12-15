@@ -2,10 +2,7 @@
 using Microsoft.Extensions.Logging;
 using System.Linq;
 using NBitcoin;
-using NBitcoin.Crypto;
-using NBitcoin.JsonConverters;
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
@@ -14,16 +11,12 @@ using NBXplorer.DerivationStrategy;
 using NBXplorer.Models;
 using System.Threading.Tasks;
 using System.Threading;
-using NBitcoin.DataEncoders;
-using DBriize.Utils;
-using System.Runtime.Serialization;
-using Newtonsoft.Json;
-using DBriize.Exceptions;
+using NBitcoin.Altcoins;
+using NBitcoin.RPC;
 using NBXplorer.Logging;
 using NBXplorer.Configuration;
-using static NBXplorer.RepositoryProvider;
-using static NBXplorer.Repository;
 using Newtonsoft.Json.Linq;
+using static NBXplorer.TrackedTransaction;
 
 namespace NBXplorer
 {
@@ -59,7 +52,10 @@ namespace NBXplorer
 		retry:
 			try
 			{
-				_Engine = new DBriizeEngine(directory);
+				_Engine = new DBriizeEngine(new DBriizeConfiguration()
+				{
+					DBriizeDataFolderName = directory
+				});
 			}
 			catch when (tried < 10)
 			{
@@ -72,7 +68,7 @@ namespace NBXplorer
 				var settings = GetChainSetting(net);
 				if (settings != null)
 				{
-					var repo = new Repository(_Engine, net, keyPathTemplates);
+					var repo = net.NBitcoinNetwork.NetworkSet == Liquid.Instance ? new LiquidRepository(_Engine, net, keyPathTemplates, settings.RPC) : new Repository(_Engine, net, keyPathTemplates, settings.RPC);
 					repo.MaxPoolSize = configuration.MaxGapSize;
 					repo.MinPoolSize = configuration.MinGapSize;
 					_Repositories.Add(net.CryptoCode, repo);
@@ -88,9 +84,9 @@ namespace NBXplorer
 		public async Task StartAsync()
 		{
 			await Task.WhenAll(_Repositories.Select(kv => kv.Value.StartAsync()).ToArray());
-			foreach	(var repo in _Repositories.Select(kv => kv.Value))
+			foreach (var repo in _Repositories.Select(kv => kv.Value))
 			{
-				if(GetChainSetting(repo.Network) is ChainConfiguration chainConf && chainConf.Rescan)
+				if (GetChainSetting(repo.Network) is ChainConfiguration chainConf && chainConf.Rescan)
 				{
 					Logs.Configuration.LogInformation($"{repo.Network.CryptoCode}: Rescanning the chain...");
 					await repo.SetIndexProgress(null);
@@ -306,8 +302,9 @@ namespace NBXplorer
 			return new Index(tx, $"{_Suffix}Events", string.Empty);
 		}
 
-		NBXplorerNetwork _Network;
+		protected NBXplorerNetwork _Network;
 		private readonly KeyPathTemplates keyPathTemplates;
+		private readonly RPCClient rpc;
 
 		public NBXplorerNetwork Network
 		{
@@ -318,13 +315,14 @@ namespace NBXplorer
 		}
 
 		DBriizeTransactionContext _TxContext;
-		internal Repository(DBriizeEngine engine, NBXplorerNetwork network, KeyPathTemplates keyPathTemplates)
+		internal Repository(DBriizeEngine engine, NBXplorerNetwork network, KeyPathTemplates keyPathTemplates, RPCClient rpc)
 		{
 			if (network == null)
 				throw new ArgumentNullException(nameof(network));
 			_Network = network;
 			this.keyPathTemplates = keyPathTemplates;
-			Serializer = new Serializer(_Network.NBitcoinNetwork);
+			this.rpc = rpc;
+			Serializer = new Serializer(_Network);
 			_Network = network;
 			_TxContext = new DBriizeTransactionContext(engine);
 			_TxContext.UnhandledException += (s, ex) =>
@@ -370,9 +368,9 @@ namespace NBXplorer
 			});
 		}
 
-		public Task<KeyPathInformation> GetUnused(DerivationStrategyBase strategy, DerivationFeature derivationFeature, int n, bool reserve)
+		public async Task<KeyPathInformation> GetUnused(DerivationStrategyBase strategy, DerivationFeature derivationFeature, int n, bool reserve)
 		{
-			return _TxContext.DoAsync<KeyPathInformation>((tx) =>
+			var keyInfo = await _TxContext.DoAsync((tx) =>
 			{
 				tx.ValuesLazyLoadingIsOn = false;
 				var availableTable = GetAvailableKeysIndex(tx, strategy, derivationFeature);
@@ -380,6 +378,7 @@ namespace NBXplorer
 				var rows = availableTable.SelectForwardSkip(n);
 				if (rows.Length == 0)
 					return null;
+
 				var keyInfo = ToObject<KeyPathInformation>(rows[0].Value).AddAddress(Network.NBitcoinNetwork);
 				if (reserve)
 				{
@@ -389,6 +388,11 @@ namespace NBXplorer
 				}
 				return keyInfo;
 			});
+			if (keyInfo != null)
+			{
+				await ImportAddressToRPC(keyInfo.TrackedSource, keyInfo.Address, keyInfo.KeyPath);
+			}
+			return keyInfo;
 		}
 
 		int GetAddressToGenerateCount(DBriize.Transactions.Transaction tx, DerivationStrategyBase strategy, DerivationFeature derivationFeature)
@@ -414,15 +418,11 @@ namespace NBXplorer
 			{
 				var index = highestGenerated + i + 1;
 				var derivation = feature.Derive((uint)index);
-				var info = new KeyPathInformation()
-				{
-					ScriptPubKey = derivation.ScriptPubKey,
-					Redeem = derivation.Redeem,
-					TrackedSource = new DerivationSchemeTrackedSource(strategy),
-					DerivationStrategy = strategy,
-					Feature = derivationFeature,
-					KeyPath = keyPathTemplates.GetKeyPathTemplate(derivationFeature).GetKeyPath(index, false)
-				};
+				var info = new KeyPathInformation(derivation,
+					new DerivationSchemeTrackedSource(strategy),
+					derivationFeature,
+					keyPathTemplates.GetKeyPathTemplate(derivationFeature).GetKeyPath(index, false),
+					Network);
 				keyPathInformations[i] = info;
 			});
 			for (int i = 0; i < toGenerate; i++)
@@ -499,7 +499,8 @@ namespace NBXplorer
 				var info = new KeyPathInformation()
 				{
 					ScriptPubKey = address.ScriptPubKey,
-					TrackedSource = (TrackedSource)address
+					TrackedSource = (TrackedSource)address,
+					Address = (address as BitcoinAddress) ?? address.ScriptPubKey.GetDestinationAddress(Network.NBitcoinNetwork)
 				};
 				var bytes = ToBytes(info);
 				GetScriptsIndex(tx, address.ScriptPubKey).Insert(address.ScriptPubKey.Hash.ToString(), bytes);
@@ -684,6 +685,7 @@ namespace NBXplorer
 		{
 			get; private set;
 		}
+
 		private T ToObject<T>(byte[] value)
 		{
 			var result = Serializer.ToObject<T>(Unzip(value));
@@ -734,29 +736,24 @@ namespace NBXplorer
 			get; set;
 		} = 30;
 
-		public async Task<TrackedTransaction[]> GetTransactions(TrackedSource trackedSource, uint256 txId = null)
+		public async Task<TrackedTransaction[]> GetTransactions(TrackedSource trackedSource, uint256 txId = null, CancellationToken cancellation = default)
 		{
-
-			bool needUpdate = false;
 			Dictionary<uint256, long> firstSeenList = new Dictionary<uint256, long>();
-
+			HashSet<ITrackedTransactionSerializable> needRemove = new HashSet<ITrackedTransactionSerializable>();
+			HashSet<ITrackedTransactionSerializable> needUpdate = new HashSet<ITrackedTransactionSerializable>();
 			var transactions = await _TxContext.DoAsync(tx =>
 			{
 				var table = GetTransactionsIndex(tx, trackedSource);
 				tx.ValuesLazyLoadingIsOn = false;
-				var result = new List<TransactionMatchData>();
+				var result = new List<ITrackedTransactionSerializable>();
 				foreach (var row in table.SelectForwardSkip(0, txId?.ToString()))
 				{
 					MemoryStream ms = new MemoryStream(row.Value);
 					BitcoinStream bs = new BitcoinStream(ms, false);
 					bs.ConsensusFactory = Network.NBitcoinNetwork.Consensus.ConsensusFactory;
-					TransactionMatchData data = new TransactionMatchData(TrackedTransactionKey.Parse(row.Key));
+					var data = CreateBitcoinSerializableTrackedTransaction(TrackedTransactionKey.Parse(row.Key));
 					data.ReadWrite(bs);
 					result.Add(data);
-
-					if (data.NeedUpdate)
-						needUpdate = true;
-
 					long firstSeen;
 					if (firstSeenList.TryGetValue(data.Key.TxId, out firstSeen))
 					{
@@ -770,9 +767,9 @@ namespace NBXplorer
 
 				}
 				return result;
-			});
+			}, cancellation);
 
-			TransactionMatchData previousConfirmed = null;
+			ITrackedTransactionSerializable previousConfirmed = null;
 			foreach (var tx in transactions)
 			{
 				if (tx.Key.BlockHash != null)
@@ -785,14 +782,13 @@ namespace NBXplorer
 							 tx.Key.TxId == previousConfirmed.Key.TxId &&
 							 tx.Key.BlockHash == previousConfirmed.Key.BlockHash)
 					{
-						needUpdate = true;
-						tx.NeedRemove = true;
+						needRemove.Add(tx);
 
 						foreach (var kv in tx.KnownKeyPathMapping)
 						{
 							// The pruned transaction has more info about owned utxo than the unpruned, we need to update the unpruned
 							if (previousConfirmed.KnownKeyPathMapping.TryAdd(kv.Key, kv.Value))
-								previousConfirmed.NeedUpdate = true;
+								needUpdate.Add(previousConfirmed);
 						}
 					}
 					else
@@ -803,31 +799,22 @@ namespace NBXplorer
 
 				if (tx.FirstSeenTickCount != firstSeenList[tx.Key.TxId])
 				{
-					needUpdate = true;
-					tx.NeedUpdate = true;
+					needUpdate.Add(tx);
 					tx.FirstSeenTickCount = firstSeenList[tx.Key.TxId];
 				}
 			}
-			if (needUpdate)
+			if (needUpdate.Count != 0 || needRemove.Count != 0)
 			{
-				// This is legacy data, need an update
-				foreach (var data in transactions.Where(t => t.NeedUpdate && t.KnownKeyPathMapping == null))
-				{
-					data.KnownKeyPathMapping = (await this.GetMatches(data.Transaction, data.Key.BlockHash, DateTimeOffset.UtcNow, false))
-											  .Where(m => m.TrackedSource.Equals(trackedSource))
-											  .Select(m => m.KnownKeyPathMapping)
-											  .First();
-				}
 #pragma warning disable CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
 				// This can be eventually consistent, let's not waste one round trip waiting for this
 				_TxContext.DoAsync(tx =>
 				{
 					var table = GetTransactionsIndex(tx, trackedSource);
-					foreach (var data in transactions.Where(t => t.NeedUpdate))
+					foreach (var data in needUpdate.Where(t => !needRemove.Contains(t)))
 					{
-						table.Insert(data.GetRowKey(), data.ToBytes());
+						table.Insert(data.Key.ToString(), data.ToBytes());
 					}
-					foreach (var data in transactions.Where(t => t.NeedRemove))
+					foreach (var data in needRemove)
 					{
 						table.RemoveKey(data.Key.ToString());
 					}
@@ -835,322 +822,15 @@ namespace NBXplorer
 				});
 #pragma warning restore CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
 			}
-			return transactions.Where(tt => !tt.NeedRemove).Select(c => c.ToTrackedTransaction(trackedSource)).ToArray();
+			return transactions.Where(tt => !needRemove.Contains(tt)).Select(c => ToTrackedTransaction(c, trackedSource)).ToArray();
 		}
 
-		public class TransactionMiniKeyInformation : IBitcoinSerializable
+		TrackedTransaction ToTrackedTransaction(ITrackedTransactionSerializable tx, TrackedSource trackedSource)
 		{
-			public TransactionMiniKeyInformation()
-			{
-
-			}
-			public TransactionMiniKeyInformation(KeyPathInformation keyInformation)
-			{
-				_KeyPath = keyInformation.KeyPath;
-				_ScriptPubKey = keyInformation.ScriptPubKey;
-			}
-
-
-
-			Script _ScriptPubKey;
-			public Script ScriptPubKey
-			{
-				get
-				{
-					return _ScriptPubKey;
-				}
-				set
-				{
-					_ScriptPubKey = value;
-				}
-			}
-
-			KeyPath _KeyPath;
-			public KeyPath KeyPath
-			{
-				get
-				{
-					return _KeyPath;
-				}
-				set
-				{
-					_KeyPath = value;
-				}
-			}
-
-			public void ReadWrite(BitcoinStream stream)
-			{
-				stream.ReadWrite(ref _ScriptPubKey);
-				if (stream.Serializing)
-				{
-					if (_KeyPath == null)
-					{
-						stream.ReadWrite((byte)0);
-					}
-					else
-					{
-						stream.ReadWrite((byte)_KeyPath.Indexes.Length);
-						foreach (var index in _KeyPath.Indexes)
-						{
-							stream.ReadWrite(index);
-						}
-					}
-				}
-				else
-				{
-					byte len = 0;
-					stream.ReadWrite(ref len);
-					var indexes = new uint[len];
-					for (int i = 0; i < len; i++)
-					{
-						uint index = 0;
-						stream.ReadWrite(ref index);
-						indexes[i] = index;
-					}
-					if (len != 0)
-						_KeyPath = new KeyPath(indexes);
-				}
-			}
-		}
-
-		public class TransactionMiniMatch : IBitcoinSerializable
-		{
-
-			public TransactionMiniMatch()
-			{
-				_Outputs = Array.Empty<TransactionMiniKeyInformation>();
-				_Inputs = Array.Empty<TransactionMiniKeyInformation>();
-			}
-
-			TransactionMiniKeyInformation[] _Outputs;
-			public TransactionMiniKeyInformation[] Outputs
-			{
-				get
-				{
-					return _Outputs;
-				}
-				set
-				{
-					_Outputs = value;
-				}
-			}
-
-
-			TransactionMiniKeyInformation[] _Inputs;
-			public TransactionMiniKeyInformation[] Inputs
-			{
-				get
-				{
-					return _Inputs;
-				}
-				set
-				{
-					_Inputs = value;
-				}
-			}
-
-			public void ReadWrite(BitcoinStream stream)
-			{
-				stream.ReadWrite(ref _Inputs);
-				stream.ReadWrite(ref _Outputs);
-			}
-		}
-
-		class TransactionMatchData : IBitcoinSerializable
-		{
-			class CoinData : IBitcoinSerializable
-			{
-				public CoinData()
-				{
-
-				}
-				public CoinData(uint index, TxOut txOut)
-				{
-					_Index = index;
-					_TxOut = txOut;
-				}
-				private uint _Index;
-				public uint Index
-				{
-					get
-					{
-						return _Index;
-					}
-				}
-				private TxOut _TxOut;
-				public TxOut TxOut
-				{
-					get
-					{
-						return _TxOut;
-					}
-				}
-
-				public void ReadWrite(BitcoinStream stream)
-				{
-					stream.ReadWriteAsVarInt(ref _Index);
-					stream.ReadWrite(ref _TxOut);
-				}
-			}
-			public TransactionMatchData(TrackedTransactionKey key)
-			{
-				if (key == null)
-					throw new ArgumentNullException(nameof(key));
-				Key = key;
-			}
-			public TransactionMatchData(TrackedTransaction trackedTransaction)
-			{
-				if (trackedTransaction == null)
-					throw new ArgumentNullException(nameof(trackedTransaction));
-				Key = trackedTransaction.Key;
-				Transaction = trackedTransaction.Transaction;
-				FirstSeenTickCount = trackedTransaction.FirstSeen.Ticks;
-				TickCount = trackedTransaction.Inserted.Ticks;
-				KnownKeyPathMapping = trackedTransaction.KnownKeyPathMapping;
-				if (trackedTransaction.Key.IsPruned)
-				{
-					_CoinsData = trackedTransaction.ReceivedCoins.Select(c => new CoinData(c.Outpoint.N, c.TxOut)).ToArray();
-				}
-			}
-			public TrackedTransactionKey Key { get; }
-			Transaction _Transaction;
-			public Transaction Transaction
-			{
-				get
-				{
-					return _Transaction;
-				}
-				set
-				{
-					_Transaction = value;
-				}
-			}
-
-
-			CoinData[] _CoinsData;
-			CoinData[] CoinsData
-			{
-				get
-				{
-					return _CoinsData;
-				}
-				set
-				{
-					_CoinsData = value;
-				}
-			}
-
-
-			long _TickCount;
-			public long TickCount
-			{
-				get
-				{
-					return _TickCount;
-				}
-				set
-				{
-					_TickCount = value;
-				}
-			}
-
-			public Dictionary<Script, KeyPath> KnownKeyPathMapping { get; set; }
-
-			long _FirstSeenTickCount;
-			public long FirstSeenTickCount
-			{
-				get
-				{
-					return _FirstSeenTickCount;
-				}
-				set
-				{
-					_FirstSeenTickCount = value;
-				}
-			}
-
-			public bool NeedUpdate
-			{
-				get; set;
-			}
-			public bool NeedRemove { get; internal set; }
-
-			public void ReadWrite(BitcoinStream stream)
-			{
-				if (Key.IsPruned)
-				{
-					stream.ReadWrite(ref _CoinsData);
-				}
-				else
-				{
-					stream.ReadWrite(ref _Transaction);
-				}
-				if (stream.Serializing || stream.Inner.Position != stream.Inner.Length)
-				{
-					stream.ReadWrite(ref _TickCount);
-					// We always with FirstSeenTickCount to be at least TickCount
-					if (!stream.Serializing)
-						_FirstSeenTickCount = _TickCount;
-				}
-				else
-				{
-					NeedUpdate = true;
-				}
-				if (stream.Serializing || stream.Inner.Position != stream.Inner.Length)
-				{
-					if (stream.Serializing)
-					{
-						var match = new TransactionMiniMatch();
-						match.Outputs = KnownKeyPathMapping.Select(kv => new TransactionMiniKeyInformation() { ScriptPubKey = kv.Key, KeyPath = kv.Value }).ToArray();
-						stream.ReadWrite(ref match);
-					}
-					else
-					{
-						var match = new TransactionMiniMatch();
-						stream.ReadWrite(ref match);
-						KnownKeyPathMapping = new Dictionary<Script, KeyPath>();
-						foreach (var kv in match.Inputs.Concat(match.Outputs))
-						{
-							KnownKeyPathMapping.TryAdd(kv.ScriptPubKey, kv.KeyPath);
-						}
-					}
-				}
-				else
-				{
-					NeedUpdate = true;
-				}
-				if (stream.Serializing || stream.Inner.Position != stream.Inner.Length)
-				{
-					stream.ReadWrite(ref _FirstSeenTickCount);
-				}
-				else
-				{
-					NeedUpdate = true;
-				}
-			}
-
-			internal string GetRowKey()
-			{
-				return Key.ToString();
-			}
-
-			public TrackedTransaction ToTrackedTransaction(TrackedSource trackedSource)
-			{
-				var trackedTransaction = Key.IsPruned
-										? new TrackedTransaction(Key, trackedSource, GetCoins(), KnownKeyPathMapping)
-										: new TrackedTransaction(Key, trackedSource, Transaction, KnownKeyPathMapping);
-				trackedTransaction.Inserted = TickCount == 0 ? NBitcoin.Utils.UnixTimeToDateTime(0) : new DateTimeOffset((long)TickCount, TimeSpan.Zero);
-				trackedTransaction.FirstSeen = FirstSeenTickCount == 0 ? NBitcoin.Utils.UnixTimeToDateTime(0) : new DateTimeOffset((long)FirstSeenTickCount, TimeSpan.Zero);
-				return trackedTransaction;
-			}
-
-			private IEnumerable<Coin> GetCoins()
-			{
-				foreach (var coinData in _CoinsData)
-				{
-					yield return new Coin(new OutPoint(Key.TxId, (int)coinData.Index), coinData.TxOut);
-				}
-			}
+			var trackedTransaction = CreateTrackedTransaction(trackedSource, tx);
+			trackedTransaction.Inserted = tx.TickCount == 0 ? NBitcoin.Utils.UnixTimeToDateTime(0) : new DateTimeOffset((long)tx.TickCount, TimeSpan.Zero);
+			trackedTransaction.FirstSeen = tx.FirstSeenTickCount == 0 ? NBitcoin.Utils.UnixTimeToDateTime(0) : new DateTimeOffset((long)tx.FirstSeenTickCount, TimeSpan.Zero);
+			return trackedTransaction;
 		}
 
 		public async Task SaveMetadata<TMetadata>(TrackedSource source, string key, TMetadata value) where TMetadata : class
@@ -1159,14 +839,24 @@ namespace NBXplorer
 			{
 				var table = GetMetadataIndex(tx, source);
 				if (value != null)
+				{
 					table.Insert(key, Zip(Serializer.ToString(value)));
+					_NoMetadataCache.Remove((source, key));
+				}
 				else
+				{
 					table.RemoveKey(key);
+					_NoMetadataCache.Add((source, key));
+				}
 				tx.Commit();
 			});
 		}
-		public async Task<TMetadata> GetMetadata<TMetadata>(TrackedSource source, string key) where TMetadata: class
+
+		FixedSizeCache<(TrackedSource, String), string> _NoMetadataCache = new FixedSizeCache<(TrackedSource, String), string>(100, (kv) => $"{kv.Item1}:{kv.Item2}");
+		public async Task<TMetadata> GetMetadata<TMetadata>(TrackedSource source, string key) where TMetadata : class
 		{
+			if (_NoMetadataCache.Contains((source, key)))
+				return default;
 			return await _TxContext.DoAsync(tx =>
 			{
 				var table = GetMetadataIndex(tx, source);
@@ -1174,6 +864,7 @@ namespace NBXplorer
 				{
 					return Serializer.ToObject<TMetadata>(Unzip(row.Value));
 				}
+				_NoMetadataCache.Add((source, key));
 				return null;
 			});
 		}
@@ -1196,7 +887,8 @@ namespace NBXplorer
 						{
 							foreach (var kv in value.KnownKeyPathMapping)
 							{
-								var info = new KeyPathInformation(keyPathTemplates, kv.Value, s.DerivationStrategy);
+								var derivation = s.DerivationStrategy.GetDerivation(kv.Value);
+								var info = new KeyPathInformation(derivation, s, keyPathTemplates.GetDerivationFeature(kv.Value), kv.Value, _Network);
 								var availableIndex = GetAvailableKeysIndex(tx, s.DerivationStrategy, info.Feature);
 								var reservedIndex = GetReservedKeysIndex(tx, s.DerivationStrategy, info.Feature);
 								var index = info.GetIndex();
@@ -1215,9 +907,9 @@ namespace NBXplorer
 						var ms = new MemoryStream();
 						BitcoinStream bs = new BitcoinStream(ms, true);
 						bs.ConsensusFactory = Network.NBitcoinNetwork.Consensus.ConsensusFactory;
-						TransactionMatchData data = new TransactionMatchData(value);
+						var data = value.CreateBitcoinSerializable();
 						bs.ReadWrite(data);
-						table.Insert(data.GetRowKey(), ms.ToArrayEfficient());
+						table.Insert(data.Key.ToString(), ms.ToArrayEfficient());
 					}
 				}
 				tx.Commit();
@@ -1234,16 +926,6 @@ namespace NBXplorer
 				foreach (var tracked in prunable)
 				{
 					table.RemoveKey(tracked.Key.ToString());
-					if (tracked.Key.BlockHash != null)
-					{
-						var pruned = tracked.Prune();
-						var data = new TransactionMatchData(pruned);
-						MemoryStream ms = new MemoryStream();
-						BitcoinStream bs = new BitcoinStream(ms, true);
-						bs.ConsensusFactory = Network.NBitcoinNetwork.Consensus.ConsensusFactory;
-						data.ReadWrite(bs);
-						table.Insert(data.GetRowKey(), ms.ToArrayEfficient());
-					}
 				}
 				tx.Commit();
 			});
@@ -1343,6 +1025,7 @@ namespace NBXplorer
 			}
 			if (scripts.Count == 0)
 				return Array.Empty<TrackedTransaction>();
+			var keyPathInformationsByTrackedTransaction = new MultiValueDictionary<TrackedTransaction, KeyPathInformation>();
 			var keyInformations = await GetKeyInformations(scripts.ToArray());
 			foreach (var keyInfoByScripts in keyInformations)
 			{
@@ -1355,25 +1038,24 @@ namespace NBXplorer
 						var matchesGroupingKey = $"{keyInfo.DerivationStrategy?.ToString() ?? keyInfo.ScriptPubKey.ToHex()}-[{tx.GetHash()}]";
 						if (!matches.TryGetValue(matchesGroupingKey, out TrackedTransaction match))
 						{
-							match = new TrackedTransaction(
+							match = CreateTrackedTransaction(keyInfo.TrackedSource,
 								new TrackedTransactionKey(tx.GetHash(), blockId, false),
-								keyInfo.TrackedSource,
 								tx,
-								new Dictionary<Script, KeyPath>())
-							{
-								FirstSeen = now,
-								Inserted = now
-							};
+								new Dictionary<Script, KeyPath>());
+							match.FirstSeen = now;
+							match.Inserted = now;
 							matches.Add(matchesGroupingKey, match);
 						}
 						if (keyInfo.KeyPath != null)
 							match.KnownKeyPathMapping.TryAdd(keyInfo.ScriptPubKey, keyInfo.KeyPath);
+						keyPathInformationsByTrackedTransaction.Add(match, keyInfo);
 					}
 				}
 			}
 			foreach (var m in matches.Values)
 			{
 				m.KnownKeyPathMappingUpdated();
+				await AfterMatch(m, keyPathInformationsByTrackedTransaction[m]);
 			}
 
 			foreach (var tx in txs)
@@ -1385,6 +1067,64 @@ namespace NBXplorer
 				}
 			}
 			return matches.Values.Count == 0 ? Array.Empty<TrackedTransaction>() : matches.Values.ToArray();
+		}
+		public virtual TrackedTransaction CreateTrackedTransaction(TrackedSource trackedSource, TrackedTransactionKey transactionKey, Transaction tx, Dictionary<Script, KeyPath> knownScriptMapping)
+		{
+			return new TrackedTransaction(transactionKey, trackedSource, tx, knownScriptMapping);
+		}
+		public virtual TrackedTransaction CreateTrackedTransaction(TrackedSource trackedSource, TrackedTransactionKey transactionKey, IEnumerable<Coin> coins, Dictionary<Script, KeyPath> knownScriptMapping)
+		{
+			return new TrackedTransaction(transactionKey, trackedSource, coins, knownScriptMapping);
+		}
+		public virtual TrackedTransaction CreateTrackedTransaction(TrackedSource trackedSource, ITrackedTransactionSerializable tx)
+		{
+			return tx.Key.IsPruned
+						? CreateTrackedTransaction(trackedSource, tx.Key, tx.GetCoins(), tx.KnownKeyPathMapping)
+						: CreateTrackedTransaction(trackedSource, tx.Key, tx.Transaction, tx.KnownKeyPathMapping);
+		}
+		protected virtual ITrackedTransactionSerializable CreateBitcoinSerializableTrackedTransaction(TrackedTransactionKey trackedTransactionKey)
+		{
+			return new TrackedTransaction.TransactionMatchData(trackedTransactionKey);
+		}
+		protected virtual async Task AfterMatch(TrackedTransaction tx, IReadOnlyCollection<KeyPathInformation> keyInfos)
+		{
+			var shouldImportRPC = (await GetMetadata<string>(tx.TrackedSource, WellknownMetadataKeys.ImportAddressToRPC)).AsBoolean();
+			if (!shouldImportRPC)
+				return;
+			var accountKey = await GetMetadata<BitcoinExtKey>(tx.TrackedSource, WellknownMetadataKeys.AccountHDKey);
+			foreach (var keyInfo in keyInfos)
+			{
+				await ImportAddressToRPC(accountKey,
+					keyInfo.Address,
+					keyInfo.KeyPath);
+			}
+		}
+
+		private async Task ImportAddressToRPC(TrackedSource trackedSource, BitcoinAddress address, KeyPath keyPath)
+		{
+			var shouldImportRPC = (await GetMetadata<string>(trackedSource, WellknownMetadataKeys.ImportAddressToRPC)).AsBoolean();
+			if (!shouldImportRPC)
+				return;
+			var accountKey = await GetMetadata<BitcoinExtKey>(trackedSource, WellknownMetadataKeys.AccountHDKey);
+			await ImportAddressToRPC(accountKey, address, keyPath);
+		}
+		private async Task ImportAddressToRPC(BitcoinExtKey accountKey, BitcoinAddress address, KeyPath keyPath)
+		{
+			if (accountKey != null)
+			{
+				await rpc.ImportPrivKeyAsync(accountKey.Derive(keyPath).PrivateKey.GetWif(Network.NBitcoinNetwork), null, false);
+			}
+			else
+			{
+				try
+				{
+					await rpc.ImportAddressAsync(address, null, false);
+				}
+				catch (RPCException) // Probably the private key has already been imported
+				{
+
+				}
+			}
 		}
 	}
 }

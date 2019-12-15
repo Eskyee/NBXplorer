@@ -19,7 +19,7 @@ branches:
 #    environment configuration    #
 #---------------------------------#
     
-image: Visual Studio 2017
+image: Visual Studio 2019
 clone_folder: c:\projects\nbxplorer
 
 clone_depth: 1
@@ -34,6 +34,12 @@ init:
 #       build configuration       #
 #---------------------------------#
 before_build:
+
+- ps: Write-Host "[$env:configuration] STARTED RabbitMq" -foregroundcolor "magenta"
+- cmd: where docker
+- cmd: docker version && docker-compose version
+- cmd: docker-compose -f docker-compose.regtest.yml up -d rabbitmq
+
 - ps: |
       Write-Host "[$env:configuration] STARTED dotnet restore" -foregroundcolor "magenta"
       
@@ -65,7 +71,7 @@ test_script:
 - ps: |
       Write-Host "[$env:configuration] STARTED dotnet test" -foregroundcolor "magenta"
       cd $env:APPVEYOR_BUILD_FOLDER
-      dotnet test -c Release ./NBXplorer.Tests/NBXplorer.Tests.csproj --filter "Azure!=Azure"
+      dotnet test -c Release ./NBXplorer.Tests/NBXplorer.Tests.csproj --filter "Azure!=Azure" --logger:"console;noprogress=true"
       Write-Host "[$env:configuration] FINISHED dotnet test" -foregroundcolor "magenta"
       if ($LastExitCode -ne 0) { $host.SetShouldExit($LastExitCode)  }
 

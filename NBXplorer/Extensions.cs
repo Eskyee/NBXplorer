@@ -35,6 +35,12 @@ namespace NBXplorer
 {
 	public static class Extensions
 	{
+		internal static bool AsBoolean(this string value)
+		{
+			if (value is string str && bool.TryParse(str, out var v))
+				return v;
+			return false;
+		}
 		internal static void AddRange<T>(this HashSet<T> hashset, IEnumerable<T> elements)
 		{
 			foreach (var el in elements)
@@ -53,7 +59,12 @@ namespace NBXplorer
 			return new uint160(Hashes.RIPEMD160(data, data.Length));
 		}
 
-
+		public static T As<T>(this IActionResult actionResult)
+		{
+			if (actionResult is JsonResult jsonResult && jsonResult.Value is T v)
+				return v;
+			return default;
+		}
 		public static async Task<DateTimeOffset?> GetBlockTimeAsync(this RPCClient client, uint256 blockId, bool throwIfNotFound = true)
 		{
 			var response = await client.SendCommandAsync(new RPCRequest("getblockheader", new object[] { blockId }), throwIfNotFound).ConfigureAwait(false);
@@ -72,7 +83,7 @@ namespace NBXplorer
 		{
 			if(keyPathInformation.Address == null)
 			{
-				keyPathInformation.Address = keyPathInformation.ScriptPubKey.GetDestinationAddress(network).ToString();
+				keyPathInformation.Address = keyPathInformation.ScriptPubKey.GetDestinationAddress(network);
 			}
 			return keyPathInformation;
 		}

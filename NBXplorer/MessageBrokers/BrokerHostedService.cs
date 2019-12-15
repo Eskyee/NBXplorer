@@ -7,6 +7,7 @@ using Microsoft.Extensions.Options;
 using NBXplorer.Configuration;
 using NBXplorer.Logging;
 using Newtonsoft.Json;
+using RabbitMQ.Client;
 using System;
 using System.Collections.Generic;
 using System.Text;
@@ -23,15 +24,14 @@ namespace NBXplorer.MessageBrokers
 		IBrokerClient _senderBlock = null;
 		IBrokerClient _senderTransactions = null;
 		ExplorerConfiguration _config;
-		JsonSerializerSettings _serializerSettings;
 
-		public BrokerHostedService(BitcoinDWaiters waiters, ChainProvider chainProvider, EventAggregator eventAggregator, IOptions<ExplorerConfiguration> config, MvcNewtonsoftJsonOptions jsonOptions)
+		public BrokerHostedService(BitcoinDWaiters waiters, ChainProvider chainProvider, EventAggregator eventAggregator, IOptions<ExplorerConfiguration> config, NBXplorerNetworkProvider networks)
 		{
 			_EventAggregator = eventAggregator;
+			Networks = networks;
 			ChainProvider = chainProvider;
 			Waiters = waiters;
 			_config = config.Value;
-			_serializerSettings = jsonOptions.SerializerSettings;
 		}
 
 		public Task StartAsync(CancellationToken cancellationToken)
@@ -65,6 +65,21 @@ namespace NBXplorer.MessageBrokers
 				if (!string.IsNullOrWhiteSpace(_config.AzureServiceBusTransactionTopic))
 					brokers.Add(CreateAzureTopic(_config.AzureServiceBusConnectionString, _config.AzureServiceBusTransactionTopic));
 			}
+			if(!string.IsNullOrEmpty(_config.RabbitMqHostName) && 
+				!string.IsNullOrEmpty(_config.RabbitMqUsername) && 
+				!string.IsNullOrEmpty(_config.RabbitMqPassword)) 
+			{
+				if(!string.IsNullOrEmpty(_config.RabbitMqTransactionExchange)) 
+				{
+					brokers.Add(CreateRabbitMqExchange(
+						hostName: _config.RabbitMqHostName,
+						virtualHost: _config.RabbitMqVirtualHost,
+						username: _config.RabbitMqUsername,
+						password: _config.RabbitMqPassword,
+						newTransactionExchange: _config.RabbitMqTransactionExchange,
+						newBlockExchange: string.Empty));
+				}
+			}
 			return new CompositeBroker(brokers);
 		}
 
@@ -78,17 +93,46 @@ namespace NBXplorer.MessageBrokers
 				if (!string.IsNullOrWhiteSpace(_config.AzureServiceBusBlockTopic))
 					brokers.Add(CreateAzureTopic(_config.AzureServiceBusConnectionString, _config.AzureServiceBusBlockTopic));
 			}
+
+			if(!string.IsNullOrEmpty(_config.RabbitMqHostName) && 
+				!string.IsNullOrEmpty(_config.RabbitMqUsername) && 
+				!string.IsNullOrEmpty(_config.RabbitMqPassword)) 
+			{
+				if(!string.IsNullOrEmpty(_config.RabbitMqBlockExchange)) 
+				{
+					brokers.Add(CreateRabbitMqExchange(
+						hostName: _config.RabbitMqHostName,
+						virtualHost: _config.RabbitMqVirtualHost,
+						username: _config.RabbitMqUsername,
+						password: _config.RabbitMqPassword,
+						newTransactionExchange: string.Empty,
+						newBlockExchange: _config.RabbitMqBlockExchange));
+				}
+			}
 			return new CompositeBroker(brokers);
 		}
 
 		private IBrokerClient CreateAzureQueue(string connnectionString, string queueName)
 		{
-			return new AzureBroker(new QueueClient(connnectionString, queueName), _serializerSettings);
+			return new AzureBroker(new QueueClient(connnectionString, queueName), Networks);
 		}
 
 		private IBrokerClient CreateAzureTopic(string connectionString, string topicName)
 		{
-			return new AzureBroker(new TopicClient(connectionString, topicName), _serializerSettings);
+			return new AzureBroker(new TopicClient(connectionString, topicName), Networks);
+		}
+
+		private IBrokerClient CreateRabbitMqExchange(
+			string hostName, string virtualHost, 
+			string username, string password, 
+			string newTransactionExchange, string newBlockExchange)
+		{
+			return new RabbitMqBroker(
+				Networks,
+				new ConnectionFactory() { 
+					HostName = hostName, VirtualHost = virtualHost,
+					UserName = username, Password = password }, 
+				newTransactionExchange, newBlockExchange );
 		}
 
 		public async Task StopAsync(CancellationToken cancellationToken)
@@ -102,6 +146,7 @@ namespace NBXplorer.MessageBrokers
 		{
 			get; set;
 		}
+		public NBXplorerNetworkProvider Networks { get; }
 		public BitcoinDWaiters Waiters
 		{
 			get; set;

@@ -10,6 +10,7 @@ using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace NBXplorer.Controllers
@@ -46,7 +47,7 @@ namespace NBXplorer.Controllers
 				txBuilder.SetLockTime(lockTime);
 				txBuilder.OptInRBF = true;
 			}
-			var utxos = (await GetUTXOs(network.CryptoCode, strategy, null)).GetUnspentCoins(request.MinConfirmations);
+			var utxos = (await GetUTXOs(network.CryptoCode, strategy, null)).As<UTXOChanges>().GetUnspentCoins(request.MinConfirmations);
 			var availableCoinsByOutpoint = utxos.ToDictionary(o => o.Outpoint);
 			if (request.IncludeOnlyOutpoints != null)
 			{
@@ -71,24 +72,35 @@ namespace NBXplorer.Controllers
 				{
 					txBuilder.Send(dest.Destination, dest.Amount);
 					if (dest.SubstractFees)
-						txBuilder.SubtractFees();
+					{
+						try
+						{
+							txBuilder.SubtractFees();
+						}
+						catch
+						{
+							throw new NBXplorerException(new NBXplorerError(400, "not-enough-funds", "You can't substract fee on this destination, because not enough money was sent to it"));
+						}
+					}
 				}
 			}
 			(Script ScriptPubKey, KeyPath KeyPath) change = (null, null);
 			bool hasChange = false;
-			// We first build the transaction with a change which keep the length of the expected change scriptPubKey
-			// This allow us to detect if there is a change later in the constructed transaction.
-			// This defend against bug which can happen if one of the destination is the same as the expected change
-			// This assume that a script with only 0 can't be created from a strategy, nor by passing any data to explicitChangeAddress
 			if (request.ExplicitChangeAddress == null)
 			{
-				// The dummyScriptPubKey is necessary to know the size of the change
-				var dummyScriptPubKey = utxos.FirstOrDefault()?.ScriptPubKey ?? strategy.GetDerivation(0).ScriptPubKey;
-				change = (Script.FromBytesUnsafe(new byte[dummyScriptPubKey.Length]), null);
+				var keyInfo = await repo.GetUnused(strategy, DerivationFeature.Change, 0, false);
+				change = (keyInfo.ScriptPubKey, keyInfo.KeyPath);
 			}
 			else
 			{
-				change = (Script.FromBytesUnsafe(new byte[request.ExplicitChangeAddress.ScriptPubKey.Length]), null);
+				// The provided explicit change might have a known keyPath, let's change for it
+				KeyPath keyPath = null;
+				var keyInfos = await repo.GetKeyInformations(new[] { request.ExplicitChangeAddress.ScriptPubKey });
+				if (keyInfos.TryGetValue(request.ExplicitChangeAddress.ScriptPubKey, out var kis))
+				{
+					keyPath = kis.FirstOrDefault(k => k.DerivationStrategy == strategy)?.KeyPath;
+				}
+				change = (request.ExplicitChangeAddress.ScriptPubKey, keyPath);
 			}
 			txBuilder.SetChange(change.ScriptPubKey);
 			PSBT psbt = null;
@@ -133,37 +145,23 @@ namespace NBXplorer.Controllers
 			{
 				throw new NBXplorerException(new NBXplorerError(400, "not-enough-funds", "Not enough funds for doing this transaction"));
 			}
-			if (hasChange) // We need to reserve an address, so we need to build again the psbt
+			// We made sure we can build the PSBT, so now we can reserve the change address if we need to
+			if (hasChange && request.ExplicitChangeAddress == null && request.ReserveChangeAddress)
 			{
-				if (request.ExplicitChangeAddress == null)
+				var derivation = await repo.GetUnused(strategy, DerivationFeature.Change, 0, true);
+				// In most of the time, this is the same as previously, so no need to rebuild PSBT
+				if (derivation.ScriptPubKey != change.ScriptPubKey)
 				{
-					var derivation = await repo.GetUnused(strategy, DerivationFeature.Change, 0, request.ReserveChangeAddress);
 					change = (derivation.ScriptPubKey, derivation.KeyPath);
+					txBuilder.SetChange(change.ScriptPubKey);
+					psbt = txBuilder.BuildPSBT(false);
 				}
-				else
-				{
-					change = (request.ExplicitChangeAddress.ScriptPubKey, null);
-				}
-				txBuilder.SetChange(change.ScriptPubKey);
-				psbt = txBuilder.BuildPSBT(false);
 			}
 
 			var tx = psbt.GetOriginalTransaction();
 			if (request.Version is uint v)
 				tx.Version = v;
 			psbt = txBuilder.CreatePSBTFrom(tx, false, SigHash.All);
-
-			// Maybe it is a change that we know about, let's search in the DB
-			if (hasChange && change.KeyPath == null)
-			{
-				var keyInfos = await repo.GetKeyInformations(new[] { request.ExplicitChangeAddress.ScriptPubKey });
-				if (keyInfos.TryGetValue(request.ExplicitChangeAddress.ScriptPubKey, out var kis))
-				{
-					var ki = kis.FirstOrDefault(k => k.DerivationStrategy == strategy);
-					if (ki != null)
-						change = (change.ScriptPubKey, kis.First().KeyPath);
-				}
-			}
 
 			await UpdatePSBTCore(new UpdatePSBTRequest()
 			{
@@ -199,8 +197,7 @@ namespace NBXplorer.Controllers
 		{
 			var repo = RepositoryProvider.GetRepository(network);
 			var rpc = Waiters.GetWaiter(network);
-
-			await UpdateInputsUTXO(update, repo, rpc);
+			await UpdateUTXO(update, repo, rpc);
 
 			if (update.DerivationScheme is DerivationStrategyBase)
 			{
@@ -218,10 +215,19 @@ namespace NBXplorer.Controllers
 			{
 				foreach (var rebase in update.RebaseKeyPaths)
 				{
-					var rootedKeyPath = rebase.GetRootedKeyPath();
-					if (rootedKeyPath == null)
-						throw new NBXplorerException(new NBXplorerError(400, "missing-parameter", "rebaseKeyPaths[].rootedKeyPath is missing"));
-					update.PSBT.RebaseKeyPaths(rebase.AccountKey, rootedKeyPath);
+					if (rebase.AccountKeyPath == null)
+						throw new NBXplorerException(new NBXplorerError(400, "missing-parameter", "rebaseKeyPaths[].accountKeyPath is missing"));
+					update.PSBT.RebaseKeyPaths(rebase.AccountKey, rebase.AccountKeyPath);
+				}
+			}
+
+			var pubkey = update.DerivationScheme.GetExtPubKeys().SingleOrDefault();
+			if (pubkey != null)
+			{
+				var accountKeyPath = await repo.GetMetadata<RootedKeyPath>(new DerivationSchemeTrackedSource(update.DerivationScheme), WellknownMetadataKeys.AccountKeyPath);
+				if (accountKeyPath != null)
+				{
+					update.PSBT.RebaseKeyPaths(pubkey, accountKeyPath);
 				}
 			}
 		}
@@ -273,15 +279,41 @@ namespace NBXplorer.Controllers
 		}
 
 
-		static bool NeedNonWitnessUtxo(PSBTInput input)
+		static bool NeedUTXO(PSBTInput input)
 		{
-			return !((input.GetSignableCoin() ?? input.GetCoin())?.GetHashVersion() is HashVersion.Witness);
+			if (input.IsFinalized())
+				return false;
+			var needNonWitnessUTXO = !input.PSBT.Network.Consensus.NeverNeedPreviousTxForSigning &&
+									!((input.GetSignableCoin() ?? input.GetCoin())?.GetHashVersion() is HashVersion.Witness);
+			if (needNonWitnessUTXO)
+				return input.NonWitnessUtxo == null;
+			else
+				return input.WitnessUtxo == null && input.NonWitnessUtxo == null;
 		}
 
-		private static async Task UpdateInputsUTXO(UpdatePSBTRequest update, Repository repo, BitcoinDWaiter rpc)
+		private async Task UpdateUTXO(UpdatePSBTRequest update, Repository repo, BitcoinDWaiter rpc)
 		{
+			AnnotatedTransactionCollection txs = null;
+			// First, we check for data in our history
+			foreach (var input in update.PSBT.Inputs.Where(NeedUTXO))
+			{
+				txs = txs ?? await GetAnnotatedTransactions(repo, ChainProvider.GetChain(repo.Network), new DerivationSchemeTrackedSource(update.DerivationScheme));
+				if (txs.GetByTxId(input.PrevOut.Hash) is AnnotatedTransaction tx)
+				{
+					if (!tx.Record.Key.IsPruned)
+					{
+						input.NonWitnessUtxo = tx.Record.Transaction;
+					}
+					else
+					{
+						input.WitnessUtxo = tx.Record.ReceivedCoins.FirstOrDefault(c => c.Outpoint.N == input.Index)?.TxOut;
+					}
+				}
+			}
+
+			// then, we search data in the saved transactions
 			await Task.WhenAll(update.PSBT.Inputs
-							.Where(NeedNonWitnessUtxo)
+							.Where(NeedUTXO)
 							.Select(async (input) =>
 							{
 								// If this is not segwit, or we are unsure of it, let's try to grab from our saved transactions
@@ -293,22 +325,14 @@ namespace NBXplorer.Controllers
 										input.NonWitnessUtxo = saved.Transaction;
 									}
 								}
-
-								// Maybe we don't have the saved transaction, but we have the WitnessUTXO from the derivation scheme UTXOs
-								if (input.NonWitnessUtxo == null)
-								{
-									var tx = (await repo.GetTransactions(new DerivationSchemeTrackedSource(update.DerivationScheme), input.PrevOut.Hash)).FirstOrDefault();
-									if (tx != null)
-									{
-										input.NonWitnessUtxo = tx.Transaction;
-									}
-								}
 							}).ToArray());
-			if (rpc?.RPCAvailable is true)
+
+			// finally, we check with rpc's txindex
+			if (rpc?.RPCAvailable is true && rpc?.HasTxIndex is true)
 			{
 				var batch = rpc.RPC.PrepareBatch();
 				var getTransactions = Task.WhenAll(update.PSBT.Inputs
-					.Where(NeedNonWitnessUtxo)
+					.Where(NeedUTXO)
 					.Where(input => input.NonWitnessUtxo == null)
 					.Select(async input =>
 				   {

@@ -82,9 +82,9 @@ namespace NBXplorer
 				throw new ArgumentNullException(nameof(network));
 			_Address = serverAddress;
 			_Network = network;
-			Serializer = new Serializer(network.NBitcoinNetwork);
+			Serializer = new Serializer(network);
 			_CryptoCode = _Network.CryptoCode;
-			_Factory = new DerivationStrategy.DerivationStrategyFactory(Network.NBitcoinNetwork);
+			_Factory = Network.DerivationStrategyFactory;
 			SetCookieAuth(network.DefaultSettings.DefaultCookieFile);
 		}
 
@@ -135,16 +135,16 @@ namespace NBXplorer
 			return GetTransactionAsync(txId, cancellation).GetAwaiter().GetResult();
 		}
 
-		public async Task<PruneResponse> PruneAsync(DerivationStrategyBase extKey, CancellationToken cancellation = default)
+		public async Task<PruneResponse> PruneAsync(DerivationStrategyBase extKey, PruneRequest pruneRequest, CancellationToken cancellation = default)
 		{
 			if (extKey == null)
 				throw new ArgumentNullException(nameof(extKey));
-			return await SendAsync<PruneResponse>(HttpMethod.Post, null, "v1/cryptos/{0}/derivations/{1}/prune", new object[] { Network.CryptoCode, extKey }, cancellation).ConfigureAwait(false);
+			return await SendAsync<PruneResponse>(HttpMethod.Post, pruneRequest, "v1/cryptos/{0}/derivations/{1}/prune", new object[] { Network.CryptoCode, extKey }, cancellation).ConfigureAwait(false);
 		}
 
-		public PruneResponse Prune(DerivationStrategyBase extKey, CancellationToken cancellation = default)
+		public PruneResponse Prune(DerivationStrategyBase extKey, PruneRequest pruneRequest, CancellationToken cancellation = default)
 		{
-			return PruneAsync(extKey, cancellation).GetAwaiter().GetResult();
+			return PruneAsync(extKey, pruneRequest, cancellation).GetAwaiter().GetResult();
 		}
 
 		public async Task ScanUTXOSetAsync(DerivationStrategyBase extKey, int? batchSize = null, int? gapLimit = null, int? fromIndex = null, CancellationToken cancellation = default)
@@ -285,6 +285,15 @@ namespace NBXplorer
 		public void CancelReservation(DerivationStrategyBase strategy, KeyPath[] keyPaths, CancellationToken cancellation = default)
 		{
 			CancelReservationAsync(strategy, keyPaths, cancellation).GetAwaiter().GetResult();
+		}
+
+		public GetBalanceResponse GetBalance(DerivationStrategyBase userDerivationScheme, CancellationToken cancellation = default)
+		{
+			return GetBalanceAsync(userDerivationScheme).GetAwaiter().GetResult();
+		}
+		public Task<GetBalanceResponse> GetBalanceAsync(DerivationStrategyBase userDerivationScheme, CancellationToken cancellation = default)
+		{
+			return SendAsync<GetBalanceResponse>(HttpMethod.Get, null, "v1/cryptos/{0}/derivations/{1}/balance", new[] { CryptoCode, userDerivationScheme.ToString() }, cancellation);
 		}
 
 		public Task CancelReservationAsync(DerivationStrategyBase strategy, KeyPath[] keyPaths, CancellationToken cancellation = default)
@@ -494,6 +503,18 @@ namespace NBXplorer
 		public Task SetMetadataAsync<TMetadata>(DerivationStrategyBase derivationScheme, string key, TMetadata value, CancellationToken cancellationToken = default)
 		{
 			return SendAsync<string>(HttpMethod.Post, value, "v1/cryptos/{0}/derivations/{1}/metadata/{2}", new object[] { CryptoCode, derivationScheme, key }, cancellationToken);
+		}
+
+		public Task<GenerateWalletResponse> GenerateWalletAsync(GenerateWalletRequest request = null, CancellationToken cancellationToken = default)
+		{
+			request ??= new GenerateWalletRequest();
+			return SendAsync<GenerateWalletResponse>(HttpMethod.Post, request, "v1/cryptos/{0}/derivations", new object[] { CryptoCode }, cancellationToken);
+		}
+
+		public GenerateWalletResponse GenerateWallet(GenerateWalletRequest request = null, CancellationToken cancellationToken = default)
+		{
+			request ??= new GenerateWalletRequest();
+			return GenerateWalletAsync(request, cancellationToken).GetAwaiter().GetResult();
 		}
 
 		private static readonly HttpClient SharedClient = new HttpClient();

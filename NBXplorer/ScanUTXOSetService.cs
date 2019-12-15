@@ -155,7 +155,7 @@ namespace NBXplorer
 						}
 						workItem.State.Progress.UpdateRemainingBatches(workItem.Options.GapLimit);
 						workItem.State.Status = ScanUTXOStatus.Pending;
-						var scannedItems = GetScannedItems(workItem, workItem.State.Progress);
+						var scannedItems = GetScannedItems(workItem, workItem.State.Progress, workItem.Network);
 						var scanning = rpc.StartScanTxoutSetAsync(scannedItems.Descriptors.ToArray());
 
 						while (true)
@@ -199,7 +199,7 @@ namespace NBXplorer
 									}
 									else
 									{
-										scannedItems = GetScannedItems(workItem, progressObj);
+										scannedItems = GetScannedItems(workItem, progressObj, workItem.Network);
 										workItem.State.Progress = progressObj;
 										scanning = rpc.StartScanTxoutSetAsync(scannedItems.Descriptors.ToArray());
 									}
@@ -283,14 +283,27 @@ namespace NBXplorer
 			await repo.UpdateAddressPool(trackedSource, progressObj.HighestKeyIndexFound);
 			await gettingBlockHeaders;
 			DateTimeOffset now = DateTimeOffset.UtcNow;
-			await repo.SaveMatches(data.Select(o => new TrackedTransaction(new TrackedTransactionKey(o.TxId, o.BlockId, true), trackedSource, o.Coins, o.KeyPathInformations)
+			await repo.SaveMatches(data.Select(o =>
 			{
-				Inserted = now,
-				FirstSeen = blockHeadersByBlockId.TryGetValue(o.BlockId, out var header) && header != null ? header.BlockTime : NBitcoin.Utils.UnixTimeToDateTime(0)
+				var trackedTransaction = repo.CreateTrackedTransaction(trackedSource, new TrackedTransactionKey(o.TxId, o.BlockId, true), o.Coins, ToDictionary(o.KeyPathInformations));
+				trackedTransaction.Inserted = now;
+				trackedTransaction.FirstSeen = blockHeadersByBlockId.TryGetValue(o.BlockId, out var header) && header != null ? header.BlockTime : NBitcoin.Utils.UnixTimeToDateTime(0);
+				return trackedTransaction;
 			}).ToArray());
 		}
+		private static Dictionary<Script, KeyPath> ToDictionary(IEnumerable<KeyPathInformation> knownScriptMapping)
+		{
+			if (knownScriptMapping == null)
+				return null;
+			var result = new Dictionary<Script, KeyPath>();
+			foreach (var keypathInfo in knownScriptMapping)
+			{
+				result.TryAdd(keypathInfo.ScriptPubKey, keypathInfo.KeyPath);
+			}
+			return result;
+		}
 
-		private ScannedItems GetScannedItems(ScanUTXOWorkItem workItem, ScanUTXOProgress progress)
+		private ScannedItems GetScannedItems(ScanUTXOWorkItem workItem, ScanUTXOProgress progress, NBXplorerNetwork network)
 		{
 			var items = new ScannedItems();
 			var derivationStrategy = workItem.DerivationStrategy;
@@ -302,15 +315,8 @@ namespace NBXplorer
 						  .Select(index =>
 						  {
 							  var derivation = lineDerivation.Derive((uint)index);
-							  var info = new KeyPathInformation()
-							  {
-								  ScriptPubKey = derivation.ScriptPubKey,
-								  Redeem = derivation.Redeem,
-								  TrackedSource = derivationStrategy,
-								  DerivationStrategy = derivationStrategy.DerivationStrategy,
-								  Feature = feature,
-								  KeyPath = keyPathTemplate.GetKeyPath(index, false)
-							  };
+							  var info = new KeyPathInformation(derivation, derivationStrategy, feature,
+								  keyPathTemplate.GetKeyPath(index, false), network);
 							  items.Descriptors.Add(new ScanTxoutSetObject(ScanTxoutDescriptor.Raw(info.ScriptPubKey)));
 							  items.KeyPathInformations.TryAdd(info.ScriptPubKey, info);
 							  return info;

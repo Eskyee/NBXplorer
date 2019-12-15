@@ -7,26 +7,17 @@ using System.Threading.Tasks;
 
 namespace NBXplorer
 {
-	internal class Prunable
+	internal class UTXOByOutpoint : IEnumerable<KeyValuePair<OutPoint, ICoin>>
 	{
-		public uint256 PrunedBy { get; set; }
-		public uint256 TransactionId { get; set; }
-	}
-	internal class UTXOByOutpoint : IEnumerable<KeyValuePair<OutPoint, Coin>>
-	{
-		Dictionary<OutPoint, Coin> _Inner;
-		Dictionary<uint256, int> _AvailableOutputs = new Dictionary<uint256, int>();
-		public List<Prunable> Prunable { get; } = new List<Prunable>();
+		Dictionary<OutPoint, ICoin> _Inner;
 
 		public UTXOByOutpoint(UTXOByOutpoint other)
 		{
-			_Inner = new Dictionary<OutPoint, Coin>(other._Inner);
-			_AvailableOutputs = new Dictionary<uint256, int>(other._AvailableOutputs);
-			Prunable = new List<Prunable>(other.Prunable);
+			_Inner = new Dictionary<OutPoint, ICoin>(other._Inner);
 		}
 		public UTXOByOutpoint()
 		{
-			_Inner = new Dictionary<OutPoint, Coin>();
+			_Inner = new Dictionary<OutPoint, ICoin>();
 		}
 
 		internal bool ContainsKey(OutPoint outpoint)
@@ -34,43 +25,17 @@ namespace NBXplorer
 			return _Inner.ContainsKey(outpoint);
 		}
 
-		internal bool Remove(OutPoint prevOut, uint256 removedBy)
+		internal bool Remove(OutPoint prevOut)
 		{
-			if(_Inner.Remove(prevOut))
-			{
-				var count = _AvailableOutputs[prevOut.Hash];
-				if(count == 1)
-				{
-					Prunable.Add(new NBXplorer.Prunable() { PrunedBy = removedBy, TransactionId = prevOut.Hash });
-					_AvailableOutputs.Remove(prevOut.Hash);
-				}
-				else
-				{
-					_AvailableOutputs[prevOut.Hash] = count - 1;
-				}
-				return true;
-			}
-			return false;
+			return _Inner.Remove(prevOut);
 		}
 		
-		internal bool TryAdd(OutPoint outpoint, Coin coin)
+		internal bool TryAdd(OutPoint outpoint, ICoin coin)
 		{
-			if(_Inner.TryAdd(outpoint, coin))
-			{
-				if(_AvailableOutputs.TryGetValue(outpoint.Hash, out int count))
-				{
-					_AvailableOutputs[outpoint.Hash] = count + 1;
-				}
-				else
-				{
-					_AvailableOutputs.Add(outpoint.Hash, 1);
-				}
-				return true;
-			}
-			return false;
+			return _Inner.TryAdd(outpoint, coin);
 		}
 
-		public IEnumerator<KeyValuePair<OutPoint, Coin>> GetEnumerator()
+		public IEnumerator<KeyValuePair<OutPoint, ICoin>> GetEnumerator()
 		{
 			return _Inner.GetEnumerator();
 		}

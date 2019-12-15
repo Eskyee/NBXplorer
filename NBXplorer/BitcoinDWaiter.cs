@@ -120,6 +120,7 @@ namespace NBXplorer
 			_ChainConfiguration = _Configuration.ChainConfigurations.First(c => c.CryptoCode == _Network.CryptoCode);
 			_ExplorerPrototype = new ExplorerBehavior(repository, chain, addressPoolService, eventAggregator) { StartHeight = _ChainConfiguration.StartHeight };
 			RPCReadyFile = Path.Combine(configuration.SignalFilesDir, $"{network.CryptoCode.ToLowerInvariant()}_fully_synched");
+			HasTxIndex = _ChainConfiguration.HasTxIndex;
 		}
 		public NodeState NodeState
 		{
@@ -449,7 +450,7 @@ namespace NBXplorer
 									throw;
 								}
 								handshaked = true;
-								var loadChainTimeout = _Network.NBitcoinNetwork.NetworkType == NetworkType.Regtest ? TimeSpan.FromSeconds(5) : TimeSpan.FromSeconds(15);
+								var loadChainTimeout = _Network.NBitcoinNetwork.NetworkType == NetworkType.Regtest ? TimeSpan.FromSeconds(5) : _Network.ChainCacheLoadingTimeout;
 								if (_Chain.Height < 5)
 									loadChainTimeout = TimeSpan.FromDays(7); // unlimited
 								Logs.Configuration.LogInformation($"{_Network.CryptoCode}: Loading chain from node");
@@ -493,7 +494,7 @@ namespace NBXplorer
 							}
 							catch (OperationCanceledException) when (!handshaked && handshakeTimeout.IsCancellationRequested)
 							{
-								Logs.Explorer.LogWarning($"{Network.CryptoCode}: The initial hanshake failed, your NBXplorer server might not be whitelisted by your node," +
+								Logs.Explorer.LogWarning($"{Network.CryptoCode}: The initial handshake failed, your NBXplorer server might not be whitelisted by your node," +
 										$" if your bitcoin node is on the same machine as NBXplorer, you should add \"whitelist=127.0.0.1\" to the configuration file of your node. (Or use whitebind)");
 								throw;
 							}
@@ -707,5 +708,6 @@ namespace NBXplorer
 		}
 
 		public GetNetworkInfoResponse NetworkInfo { get; internal set; }
+		public bool HasTxIndex { get; set; }
 	}
 }

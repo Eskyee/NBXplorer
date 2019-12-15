@@ -30,6 +30,7 @@ It currently the following altcoins:
 * BGold (also known as Bitcoin Gold)
 * Bitcoin
 * Bitcore
+* Chaincoin 
 * ColossusXT
 * Dash
 * Dogecoin
@@ -47,7 +48,7 @@ Read our [API Specification](docs/API.md), or our the [internal design of NBXplo
 
 ## Prerequisite
 
-* Install [.NET Core SDK v2.1.4 (with patch version >= 402)](https://www.microsoft.com/net/download)
+* Install [.NET Core SDK v3.1.0 or above](https://www.microsoft.com/net/download)
 * Bitcoin Core instance synched and running (at least 0.16.0).
 
 ## API Specification
@@ -100,7 +101,7 @@ You can check [the sample](docker-compose.regtest.yml) for configuring and compo
 
 ## How to develop on it?
 
-If you are on Windows, I recommend Visual Studio 2017 update 3 (15.3).
+If you are on Windows, I recommend Visual Studio 2017 update 4 (15.4).
 If you are on other platform and want lightweight environment, use [Visual Studio Code](https://code.visualstudio.com/).
 If you are hardcore, you can code on vim.
 
@@ -172,7 +173,8 @@ e.g.
 This tool will only start scanning from the configured `startheight`. (By default, the height of the blockchain during your first run)
 This means that you might not see old payments from your HD key.
 
-If you need to see old payments, you need to configure `startheight` to a specific height of your choice, then run with again with `-rescan`.
+If you need to see old payments, you need to configure `--[crypto]startheight` to a specific height of your choice, then run it again with `--[crypto]rescan`, e.g.    
+`./run.sh --chains=ltc --ltcrescan --ltcstartheight=101`
 
 ## How to query?
 
@@ -240,10 +242,50 @@ asbcnstr=Your Azure Service Bus Connection string
 asbblockq=Name of queue to send New Block message to
 asbtranq=Name of queue to send New Transaction message to
 asbblockt=Name of topic to send New Block message to
-asbtrant=[Name of queue to send New Transaction message to
+asbtrant=Name of queue to send New Transaction message to
 ```
 
-Payloads are JSON and map to `NewBlockEvent`, `NewTransactionEvent` in the `NBXplorer.Models` namespace. There is no support in NBXplorer client for Azure Service Bus at the current time. You will need to use the `Serializer` in `NBXplorer.Client` to De-serialize the objects or then implement your own JSON de-serializers for the custom types used in the payload.
+### RabbitMq
+Support has been added for RabbitMq as a message broker. Currently 2 exchanges supported;
+
+* New Block
+* New Transaction
+
+Filters can be applied on the client by defining routing keys;  
+
+For transactions;  
+* `transactions.#` to get all transactions.
+* `transactions.[BTC].#` to get all [Bitcoin] transactions.
+* `transactions.[BTC].confirmed` to get only confirmed [Bitcoin] transactions.
+* `transactions.[BTC].unconfirmed` to get only unconfirmed [Bitcoin] transactions.
+* `transactions.*.confirmed` to get all confirmed transactions.
+* `transactions.*.unconfirmed` to get all unconfirmed transactions.
+
+For blocks;    
+* `blocks.#` to get all blocks.
+* `blocks.[BTC]` to get all [Bitcoin] blocks.
+
+To activate RabbitMq mesages you should add following settings to your config file or on the command line.
+
+* rmqhost, rmquser, rmqpass
+
+#### Config Settings
+
+If you use the Configuration file to setup your NBXplorer options:
+
+```ini
+rmqhost= RabbitMq host name
+rmqvirtual= RabbitMq virtual host
+rmquser= RabbitMq username
+rmqpass= RabbitMq password
+rmqtranex= Name of exchange to send transaction messages
+rmqblockex= Name of exchange to send block messages
+```
+
+Payloads are JSON and map to `NewBlockEvent`, `NewTransactionEvent` in the `NBXplorer.Models` namespace. There is no support in NBXplorer client for message borkers at the current time. You will need to use the `Serializer` in `NBXplorer.Client` to de-serialize the objects or then implement your own JSON de-serializers for the custom types used in the payload.  
+
+For configuring serializers you can get crypto code info from `BasicProperties.Headers[CryptoCode]` of RabbitMq messages or `UserProperties[CryptoCode]` of Azure Service Bus messages.  
+Examples can be found in unit tests.
 
 #### Troubleshooting
 If you receive a 401 Unauthorized then your cookie data is not working. Check you are using the current cookie by opening the cookie file again - also check the date/time of the cookie file to ensure it is the latest cookie (generated when you launched NBXplorer).

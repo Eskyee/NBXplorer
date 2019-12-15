@@ -1,4 +1,5 @@
 ﻿using NBitcoin;
+using NBXplorer.DerivationStrategy;
 using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
@@ -10,11 +11,13 @@ namespace NBXplorer
 {
 	public class NBXplorerNetwork
 	{
-		public NBXplorerNetwork(INetworkSet networkSet, NBitcoin.NetworkType networkType)
+		public NBXplorerNetwork(INetworkSet networkSet, NetworkType networkType,
+			DerivationStrategyFactory derivationStrategyFactory = null)
 		{
 			NBitcoinNetwork = networkSet.GetNetwork(networkType);
 			CryptoCode = networkSet.CryptoCode;
 			DefaultSettings = NBXplorerDefaultSettings.GetDefaultSettings(networkType);
+			DerivationStrategyFactory = derivationStrategyFactory;
 		}
 		public Network NBitcoinNetwork
 		{
@@ -43,6 +46,12 @@ namespace NBXplorer
 			get;
 			internal set;
 		}
+
+		public virtual BitcoinAddress CreateAddress(DerivationStrategyBase derivationStrategy, KeyPath keyPath, Script scriptPubKey)
+		{
+			return scriptPubKey.GetDestinationAddress(NBitcoinNetwork);
+		}
+
 		public bool SupportCookieAuthentication
 		{
 			get;
@@ -55,7 +64,7 @@ namespace NBXplorer
 		{
 			get
 			{
-				_Serializer = _Serializer ?? new Serializer(NBitcoinNetwork);
+				_Serializer = _Serializer ?? new Serializer(this);
 				return _Serializer;
 			}
 		}
@@ -77,6 +86,12 @@ namespace NBXplorer
 			set;
 		} = TimeSpan.FromMinutes(15);
 
+		public TimeSpan ChainCacheLoadingTimeout
+		{
+			get;
+			set;
+		} = TimeSpan.FromSeconds(30);
+
 		/// <summary>
 		/// Minimum blocks to keep if pruning is activated
 		/// </summary>
@@ -84,10 +99,16 @@ namespace NBXplorer
 		{
 			get; set;
 		} = 288;
+		public KeyPath CoinType { get; internal set; }
 
 		public override string ToString()
 		{
 			return CryptoCode.ToString();
+		}
+		
+		public virtual ExplorerClient CreateExplorerClient(Uri uri)
+		{
+			return new ExplorerClient(this, uri);
 		}
 	}
 }
