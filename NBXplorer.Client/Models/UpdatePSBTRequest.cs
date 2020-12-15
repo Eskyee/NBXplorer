@@ -20,6 +20,16 @@ namespace NBXplorer.Models
 		/// This transform (PubKey0, 0/0, accountFingerprint) by (PubKey0, m/49'/0'/0/0, masterFingerprint) 
 		/// </summary>
 		public List<PSBTRebaseKeyRules> RebaseKeyPaths { get; set; }
+		
+		/// <summary>
+		/// Attempt setting non_witness_utxo for all inputs even if they are segwit.
+		/// </summary>
+		public bool AlwaysIncludeNonWitnessUTXO { get; set; }
+
+		/// <summary>
+		/// Whether the include the global xpub in the PSBT (default: false)
+		/// </summary>
+		public bool? IncludeGlobalXPub { get; set; }
 	}
 	public class UpdatePSBTResponse
 	{

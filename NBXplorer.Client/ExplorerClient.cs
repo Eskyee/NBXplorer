@@ -14,13 +14,14 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Net.WebSockets;
+using NBitcoin.RPC;
 using Newtonsoft.Json.Linq;
 
 namespace NBXplorer
 {
 	public class ExplorerClient
 	{
-		internal interface IAuth
+		public interface IAuth
 		{
 			bool RefreshCache();
 			void SetAuthorization(HttpRequestMessage message);
@@ -37,11 +38,13 @@ namespace NBXplorer
 				_CookieFilePath = path;
 			}
 
+			public string CookieFilePath => _CookieFilePath;
+
 			public bool RefreshCache()
 			{
 				try
 				{
-					var cookieData = File.ReadAllText(_CookieFilePath);
+					var cookieData = File.ReadAllText(CookieFilePath);
 					_CachedAuth = new AuthenticationHeaderValue("Basic", Encoders.Base64.EncodeData(Encoders.ASCII.DecodeData(cookieData)));
 					return true;
 				}
@@ -75,7 +78,11 @@ namespace NBXplorer
 			}
 		}
 
-		public ExplorerClient(NBXplorerNetwork network, Uri serverAddress = null)
+		public ExplorerClient(NBXplorerNetwork network, Uri serverAddress = null) : this(network, serverAddress, null)
+		{
+
+		}
+		public ExplorerClient(NBXplorerNetwork network, Uri serverAddress, IAuth customAuth)
 		{
 			serverAddress = serverAddress ?? network.DefaultSettings.DefaultUrl;
 			if (network == null)
@@ -85,8 +92,18 @@ namespace NBXplorer
 			Serializer = new Serializer(network);
 			_CryptoCode = _Network.CryptoCode;
 			_Factory = Network.DerivationStrategyFactory;
-			SetCookieAuth(network.DefaultSettings.DefaultCookieFile);
+			if (customAuth == null)
+			{
+				SetCookieAuth(network.DefaultSettings.DefaultCookieFile);
+			}
+			else
+			{
+				_Auth = customAuth;
+				customAuth.RefreshCache();
+			}
 		}
+
+		public RPCClient RPCClient { get; private set; }
 
 		internal IAuth _Auth = new NullAuthentication();
 
@@ -95,13 +112,23 @@ namespace NBXplorer
 			if (path == null)
 				throw new ArgumentNullException(nameof(path));
 			CookieAuthentication auth = new CookieAuthentication(path);
-			_Auth = auth;
+			Auth = auth;
 			return auth.RefreshCache();
 		}
 
 		public void SetNoAuth()
 		{
-			_Auth = new NullAuthentication();
+			Auth = new NullAuthentication();
+		}
+
+		private void ConstructRPCClient()
+		{
+			RPCClient = new RPCClient(Auth is CookieAuthentication cookieAuthentication
+				? new RPCCredentialString()
+				{
+					CookieFile = cookieAuthentication.CookieFilePath
+				}
+				: new RPCCredentialString(), GetFullUri($"v1/cryptos/{_CryptoCode}/rpc"), _Network.NBitcoinNetwork);
 		}
 
 		private readonly string _CryptoCode = "BTC";
@@ -124,7 +151,6 @@ namespace NBXplorer
 				throw new ArgumentNullException(nameof(extKey));
 			return GetUTXOsAsync(TrackedSource.Create(extKey), cancellation);
 		}
-
 		public async Task<TransactionResult> GetTransactionAsync(uint256 txId, CancellationToken cancellation = default)
 		{
 			return await SendAsync<TransactionResult>(HttpMethod.Get, null, "v1/cryptos/{0}/transactions/" + txId, new[] { CryptoCode }, cancellation).ConfigureAwait(false);
@@ -289,11 +315,21 @@ namespace NBXplorer
 
 		public GetBalanceResponse GetBalance(DerivationStrategyBase userDerivationScheme, CancellationToken cancellation = default)
 		{
-			return GetBalanceAsync(userDerivationScheme).GetAwaiter().GetResult();
+			return GetBalanceAsync(userDerivationScheme, cancellation).GetAwaiter().GetResult();
 		}
 		public Task<GetBalanceResponse> GetBalanceAsync(DerivationStrategyBase userDerivationScheme, CancellationToken cancellation = default)
 		{
 			return SendAsync<GetBalanceResponse>(HttpMethod.Get, null, "v1/cryptos/{0}/derivations/{1}/balance", new[] { CryptoCode, userDerivationScheme.ToString() }, cancellation);
+		}
+
+
+		public GetBalanceResponse GetBalance(BitcoinAddress address, CancellationToken cancellation = default)
+		{
+			return GetBalanceAsync(address, cancellation).GetAwaiter().GetResult();
+		}
+		public Task<GetBalanceResponse> GetBalanceAsync(BitcoinAddress address, CancellationToken cancellation = default)
+		{
+			return SendAsync<GetBalanceResponse>(HttpMethod.Get, null, "v1/cryptos/{0}/addresses/{1}/balance", new[] { CryptoCode, address.ToString() }, cancellation);
 		}
 
 		public Task CancelReservationAsync(DerivationStrategyBase strategy, KeyPath[] keyPaths, CancellationToken cancellation = default)
@@ -471,15 +507,23 @@ namespace NBXplorer
 				throw new ArgumentNullException(nameof(request));
 			return this.SendAsync<UpdatePSBTResponse>(HttpMethod.Post, request, "v1/cryptos/{0}/psbt/update", new object[] { CryptoCode }, cancellation);
 		}
-
 		public BroadcastResult Broadcast(Transaction tx, CancellationToken cancellation = default)
 		{
-			return BroadcastAsync(tx, cancellation).GetAwaiter().GetResult();
+			return Broadcast(tx, false, cancellation);
+		}
+		public BroadcastResult Broadcast(Transaction tx, bool testMempoolAccept, CancellationToken cancellation = default)
+		{
+			return BroadcastAsync(tx, testMempoolAccept, cancellation).GetAwaiter().GetResult();
 		}
 
 		public Task<BroadcastResult> BroadcastAsync(Transaction tx, CancellationToken cancellation = default)
 		{
-			return SendAsync<BroadcastResult>(HttpMethod.Post, tx.ToBytes(), "v1/cryptos/{0}/transactions", new[] { CryptoCode }, cancellation);
+			return BroadcastAsync(tx, false, cancellation);
+		}
+
+		public Task<BroadcastResult> BroadcastAsync(Transaction tx, bool testMempoolAccept, CancellationToken cancellation = default)
+		{
+			return SendAsync<BroadcastResult>(HttpMethod.Post, tx.ToBytes(), "v1/cryptos/{0}/transactions?testMempoolAccept={1}", new[] { CryptoCode, testMempoolAccept.ToString() }, cancellation);
 		}
 
 		public TMetadata GetMetadata<TMetadata>(DerivationStrategyBase derivationScheme, string key, CancellationToken cancellationToken = default)
@@ -499,7 +543,7 @@ namespace NBXplorer
 		{
 			SetMetadataAsync<TMetadata>(derivationScheme, key, value, cancellationToken).GetAwaiter().GetResult();
 		}
-		
+
 		public Task SetMetadataAsync<TMetadata>(DerivationStrategyBase derivationScheme, string key, TMetadata value, CancellationToken cancellationToken = default)
 		{
 			return SendAsync<string>(HttpMethod.Post, value, "v1/cryptos/{0}/derivations/{1}/metadata/{2}", new object[] { CryptoCode, derivationScheme, key }, cancellationToken);
@@ -550,6 +594,16 @@ namespace NBXplorer
 		} = true;
 		public Serializer Serializer { get; private set; }
 
+		internal IAuth Auth
+		{
+			get => _Auth;
+			set
+			{
+				_Auth = value;
+				ConstructRPCClient();
+			}
+		}
+
 		internal string GetFullUri(string relativePath, params object[] parameters)
 		{
 			relativePath = String.Format(relativePath, parameters ?? new object[0]);
@@ -578,13 +632,13 @@ namespace NBXplorer
 			{
 				return default(T);
 			}
-			if(result.StatusCode == HttpStatusCode.GatewayTimeout || result.StatusCode == HttpStatusCode.RequestTimeout)
+			if (result.StatusCode == HttpStatusCode.GatewayTimeout || result.StatusCode == HttpStatusCode.RequestTimeout)
 			{
 				throw new HttpRequestException($"HTTP error {(int)result.StatusCode}", new TimeoutException());
 			}
 			if ((int)result.StatusCode == 401)
 			{
-				if (_Auth.RefreshCache())
+				if (Auth.RefreshCache())
 				{
 					message = CreateMessage(method, body, relativePath, parameters);
 					result = await Client.SendAsync(message).ConfigureAwait(false);
@@ -597,11 +651,15 @@ namespace NBXplorer
 		{
 			var uri = GetFullUri(relativePath, parameters);
 			var message = new HttpRequestMessage(method, uri);
-			_Auth.SetAuthorization(message);
+			Auth.SetAuthorization(message);
 			if (body != null)
 			{
 				if (body is byte[])
-					message.Content = new ByteArrayContent((byte[])body);
+				{
+					var content = new ByteArrayContent((byte[])body);
+					content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+					message.Content = content;
+				}
 				else
 					message.Content = new StringContent(Serializer.ToString(body), Encoding.UTF8, "application/json");
 			}

@@ -31,7 +31,8 @@ namespace NBXplorer.Configuration
 			app.Option("--regtest | -regtest", $"Use regtest", CommandOptionType.BoolValue);
 			app.Option("--chains", $"Chains to support comma separated (default: btc, available: {chains})", CommandOptionType.SingleValue);
 
-			foreach(var network in provider.GetAll())
+			app.Option($"--dbcache", $"If more than 0, the size of the cache for the database, in MB. Else, no limit on the size of the cache. (default: 50)", CommandOptionType.SingleValue);
+			foreach (var network in provider.GetAll())
 			{
 				var crypto = network.CryptoCode.ToLowerInvariant();
 				app.Option($"--{crypto}rescan", $"Rescan from startheight", CommandOptionType.BoolValue);
@@ -41,6 +42,7 @@ namespace NBXplorer.Configuration
 				app.Option($"--{crypto}rpcauth", $"RPC authentication method 3: user:password or cookiefile=path (default: using cookie auth from default network folder)", CommandOptionType.SingleValue);
 				app.Option($"--{crypto}rpcurl", $"The RPC server url (default: default rpc server depended on the network)", CommandOptionType.SingleValue);
 				app.Option($"--{crypto}startheight", $"The height where starting the scan (default: where your rpc server was synched when you first started this program)", CommandOptionType.SingleValue);
+				app.Option($"--{crypto}minutxovalue", $"The minimum value of tracked UTXOs, any UTXO with value less than this is ignored. (default: 1 (satoshi))", CommandOptionType.SingleValue);
 				app.Option($"--{crypto}nodeendpoint", $"The p2p connection to a Bitcoin node, make sure you are whitelisted (default: default p2p node on localhost, depends on network)", CommandOptionType.SingleValue);
 				app.Option($"--{crypto}hastxindex", "If true, NBXplorer will try to fetch missing transactions from the local node (default: false)", CommandOptionType.BoolValue);
 			}
@@ -61,10 +63,13 @@ namespace NBXplorer.Configuration
 			app.Option("--customkeypathtemplate", $"Define an additional derivation path tracked by NBXplorer (Format: m/1/392/*/29, default: empty)", CommandOptionType.SingleValue);
 			app.Option("--maxgapsize", $"The maximum gap address count on which the explorer will track derivation schemes (default: 30)", CommandOptionType.SingleValue);
 			app.Option("--mingapsize", $"The minimum gap address count on which the explorer will track derivation schemes (default: 20)", CommandOptionType.SingleValue);
+			app.Option("--trimevents", $"When NBXplorer starts, NBXplorer will remove old events to reach this count. No trimming if equals to less than 0 (default: -1)", CommandOptionType.SingleValue);
 			app.Option("--signalfilesdir", $"The directory where files signaling if a chain is ready is created (default: the network specific datadir)", CommandOptionType.SingleValue);
 			app.Option("--noauth", $"Disable cookie authentication", CommandOptionType.BoolValue);
+			app.Option("--instancename", $"Define an instance name for this server that, if not null, will show in status response and in HTTP response headers (default: empty)", CommandOptionType.SingleValue);
 			app.Option("--cachechain", $"Whether the chain of header is locally cached for faster startup (default: true)", CommandOptionType.SingleValue);
 			app.Option("--rpcnotest", $"Faster start because RPC connection testing skipped (default: false)", CommandOptionType.SingleValue);
+			app.Option("--exposerpc", $"Expose the node RPC through the REST API (default: false)", CommandOptionType.SingleValue);
 			app.Option("-v | --verbose", $"Verbose logs (default: true)", CommandOptionType.SingleValue);
 			return app;
 		}
@@ -138,13 +143,22 @@ namespace NBXplorer.Configuration
 				builder.AppendLine("## This is the connection to your node through P2P");
 				builder.AppendLine($"#{cryptoCode}.node.endpoint=127.0.0.1:" + network);
 				builder.AppendLine();
+				builder.AppendLine("## minutxovalue defines the minimum value allowed for a utxo to be tracked");
+				builder.AppendLine($"#{cryptoCode}.minutxovalue=1");
+				builder.AppendLine();
 				builder.AppendLine("## startheight defines from which block you will start scanning, if -1 is set, it will use current blockchain height");
 				builder.AppendLine($"#{cryptoCode}.startheight=-1");
 				builder.AppendLine("## rescan forces a rescan from startheight");
 				builder.AppendLine($"#{cryptoCode}.rescan=0");
 			}
+			builder.AppendLine("## If more than 0, the size of the cache for the database, in MB. Else, no limit on the size of the cache. (default: 50)");
+			builder.AppendLine("#dbcache=50");
 			builder.AppendLine("## Disable cookie, local ip authorization (unsecured)");
 			builder.AppendLine("#noauth=0");
+			builder.AppendLine("## Add a server alias to be returned in status response");
+			builder.AppendLine("#instancename=my_business_nbxplorer");
+			builder.AppendLine("## Expose the node RPC through the REST API");
+			builder.AppendLine($"#exposerpc=0");
 			builder.AppendLine("## What crypto currencies is supported");
 			var chains = string.Join(',', new NBXplorerNetworkProvider(NetworkType.Mainnet)
 				.GetAll()

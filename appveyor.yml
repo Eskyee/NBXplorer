@@ -42,8 +42,8 @@ before_build:
 
 - ps: |
       Write-Host "[$env:configuration] STARTED dotnet restore" -foregroundcolor "magenta"
-      
-      dotnet restore -v m
+      dotnet nuget locals all --clear
+      dotnet restore -v diag -p:DisableImplicitNuGetFallbackFolder=true
       Write-Host "[$env:configuration] FINISHED dotnet restore" -foregroundcolor "magenta"
       if ($LastExitCode -ne 0) { $host.SetShouldExit($LastExitCode) }
     
